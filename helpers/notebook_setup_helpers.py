@@ -1,0 +1,314 @@
+"""Shared setup helpers for segmentation notebooks."""
+
+from __future__ import annotations
+
+import importlib
+import importlib.util
+import subprocess
+import sys
+from typing import Any
+
+
+DEFAULT_PIP_PACKAGES = [
+    "aicsimageio[nd2]",
+    "fsspec",
+    "readlif",
+    "nd2reader",
+    "oiffile",
+    "opencv-python",
+    "cellpose>=3.0",
+    "xlsxwriter",
+    "reportlab",
+]
+
+# TensorFlow (and therefore StarDist) ships no wheels for Python 3.14 yet.
+TENSORFLOW_MAX_PYTHON = (3, 13)
+
+# aicspylibczi (Zeiss .czi reader) ships no wheels for Python 3.14 yet.
+AICSPYLIBCZI_MAX_PYTHON = (3, 13)
+
+# Kept in sync with the python_version markers in requirements.txt.
+SUPPORTED_PYTHON_VERSIONS = {(3, 10), (3, 11), (3, 12), (3, 13), (3, 14)}
+
+# Harmless Qt messages hidden from the notebook output (see hide_harmless_qt_warnings).
+HIDDEN_QT_MESSAGES = (
+    # Windows nudges napari's window by a few pixels on multi-monitor/scaled displays.
+    "QWindowsWindow::setGeometry: Unable to set geometry",
+)
+
+# Kept at module level so the handler is not garbage-collected while Qt uses it.
+_qt_message_handler = None
+
+
+def hide_harmless_qt_warnings() -> None:
+    """Drop the Qt messages in ``HIDDEN_QT_MESSAGES``; every other message is passed on."""
+    global _qt_message_handler
+    if _qt_message_handler is not None:
+        return
+    try:
+        from qtpy.QtCore import qInstallMessageHandler
+    except Exception:
+        return
+
+    previous = None
+
+    def _handler(mode, context, message):
+        if message.startswith(HIDDEN_QT_MESSAGES):
+            return
+        if previous is not None:
+            previous(mode, context, message)
+        else:
+            sys.stderr.write(message + "\n")
+
+    _qt_message_handler = _handler
+    previous = qInstallMessageHandler(_handler)
+
+
+def check_python_version() -> None:
+    """Print whether the active interpreter matches a version requirements.txt is pinned for."""
+    version = sys.version_info[:2]
+    version_str = f"{version[0]}.{version[1]}"
+    if version in SUPPORTED_PYTHON_VERSIONS:
+        print(f"Python {version_str} detected -- supported by requirements.txt.")
+    else:
+        supported_str = ", ".join(f"{major}.{minor}" for major, minor in sorted(SUPPORTED_PYTHON_VERSIONS))
+        print(
+            f"Warning: Python {version_str} detected. requirements.txt is pinned for "
+            f"{supported_str} -- other versions may fail to install or behave "
+            "unexpectedly. See README.md Prerequisites."
+        )
+
+
+def stardist_available() -> bool:
+    """Return True if the StarDist stack (tensorflow, csbdeep, stardist) is installed."""
+    return all(
+        importlib.util.find_spec(name) is not None
+        for name in ("tensorflow", "csbdeep", "stardist")
+    )
+
+
+def resolve_stardist_flag(trig_stardist: bool) -> bool:
+    """Return ``trig_stardist``, forced to False (with a warning) if StarDist can't run.
+
+    StarDist needs TensorFlow, which has no wheels for Python 3.14. Called by
+    ``segment_nuclei`` and ``run_batch_folder``, so the nuclei notebook doesn't
+    need to call it itself.
+    """
+    if not trig_stardist or stardist_available():
+        return trig_stardist
+
+    if sys.version_info[:2] > TENSORFLOW_MAX_PYTHON:
+        reason = (
+            f"Python {sys.version_info[0]}.{sys.version_info[1]} is in use and TensorFlow "
+            "has no wheels for it, so StarDist (which needs TensorFlow) is not installed."
+        )
+        hint = "Use Python 3.10-3.13 to run StarDist, or use trig_cellpose = True instead."
+    else:
+        reason = "TensorFlow, csbdeep and/or stardist are not installed in this environment."
+        hint = "Install them with requirements.txt, or use trig_cellpose = True instead."
+
+    print(
+        "\n" + "!" * 78 + "\n"
+        "WARNING: trig_stardist was set to True but StarDist is NOT available.\n"
+        f"  {reason}\n"
+        f"  {hint}\n"
+        "  -> trig_stardist has been automatically set to False; the workflow will\n"
+        "     use the other selected method (Cellpose, or watershed if none).\n"
+        + "!" * 78 + "\n"
+    )
+    return False
+
+
+def get_tetgen_requirement() -> str:
+    """Return a tetgen requirement compatible with the current Python version."""
+    if sys.version_info < (3, 10):
+        return "tetgen<0.7"
+    return "tetgen>=0.7"
+
+
+def install_required_packages(extra_packages: list[str] | None = None) -> None:
+    """Install required notebook packages with the active Python executable."""
+    packages = list(DEFAULT_PIP_PACKAGES)
+    if sys.version_info[:2] <= TENSORFLOW_MAX_PYTHON:
+        packages.append("tensorflow")
+    else:
+        print("Skipping tensorflow: no wheels for this Python version (StarDist will be unavailable).")
+    if sys.version_info[:2] <= AICSPYLIBCZI_MAX_PYTHON:
+        packages.append("aicspylibczi")
+    else:
+        print("Skipping aicspylibczi: no wheels for this Python version (.czi files cannot be read).")
+    packages.append(get_tetgen_requirement())
+    if extra_packages:
+        packages.extend(extra_packages)
+
+    for package in packages:
+        print(f"Installing {package}...")
+        subprocess.check_call([sys.executable, "-m", "pip", "install", package])
+
+    print("Package installation complete.")
+
+
+def load_common_imports(
+    profile: str = "nuclei",
+    enable_napari_interactive: bool = True,
+) -> dict[str, Any]:
+    """Import libraries for a notebook profile and return them as globals-ready dict."""
+    imported: dict[str, Any] = {}
+
+    imported["Path"] = importlib.import_module("pathlib").Path
+    imported["os"] = importlib.import_module("os")
+    imported["st"] = importlib.import_module("statistics")
+    imported["cv2"] = importlib.import_module("cv2")
+    imported["napari"] = importlib.import_module("napari")
+    imported["pd"] = importlib.import_module("pandas")
+    imported["pv"] = importlib.import_module("pyvista") if profile == "nuclei" else None
+    imported["np"] = importlib.import_module("numpy")
+    imported["plt"] = importlib.import_module("matplotlib.pyplot")
+    imported["mcolors"] = importlib.import_module("matplotlib.colors") if profile == "nuclei" else None
+    imported["Line2D"] = importlib.import_module("matplotlib.lines").Line2D if profile == "nuclei" else None
+    imported["sitk"] = importlib.import_module("SimpleITK") if profile == "nuclei" else None
+    imported["skimage"] = importlib.import_module("skimage")
+
+    imported["ndi"] = importlib.import_module("scipy.ndimage")
+    imported["gaussian_kde"] = importlib.import_module("scipy.stats").gaussian_kde if profile == "nuclei" else None
+    imported["label"] = importlib.import_module("scipy.ndimage").label
+    imported["zoom"] = importlib.import_module("scipy.ndimage").zoom
+    imported["binary_dilation"] = (
+        importlib.import_module("scipy.ndimage").binary_dilation if profile == "nuclei" else None
+    )
+    imported["generate_binary_structure"] = (
+        importlib.import_module("scipy.ndimage").generate_binary_structure if profile == "nuclei" else None
+    )
+
+    imported["filters"] = importlib.import_module("skimage.filters")
+    imported["morphology"] = importlib.import_module("skimage.morphology")
+    imported["peak_local_max"] = importlib.import_module("skimage.feature").peak_local_max if profile == "nuclei" else None
+    imported["watershed"] = importlib.import_module("skimage.segmentation").watershed
+    imported["relabel_sequential"] = (
+        importlib.import_module("skimage.segmentation").relabel_sequential if profile == "nuclei" else None
+    )
+    imported["ball"] = importlib.import_module("skimage.morphology").ball if profile == "nuclei" else None
+    imported["threshold_otsu"] = importlib.import_module("skimage.filters").threshold_otsu if profile == "nuclei" else None
+    imported["threshold_niblack"] = (
+        importlib.import_module("skimage.filters").threshold_niblack if profile == "nuclei" else None
+    )
+    imported["threshold_sauvola"] = importlib.import_module("skimage.filters").threshold_sauvola
+    imported["regionprops"] = importlib.import_module("skimage.measure").regionprops if profile == "nuclei" else None
+
+    imported["combinations"] = importlib.import_module("itertools").combinations if profile == "nuclei" else None
+    imported["defaultdict"] = importlib.import_module("collections").defaultdict if profile == "nuclei" else None
+    imported["AICSImage"] = importlib.import_module("aicsimageio").AICSImage
+    imported["open_image_file"] = importlib.import_module("helpers.notebook_helpers").open_image_file
+    try:
+        imported["ND2Reader"] = importlib.import_module("nd2reader").ND2Reader
+    except ImportError:
+        imported["ND2Reader"] = None
+    imported["Colormap"] = importlib.import_module("vispy.color").Colormap if profile == "nuclei" else None
+    imported["to_rgb"] = importlib.import_module("matplotlib.colors").to_rgb if profile == "nuclei" else None
+    # StarDist/CSBDeep need TensorFlow, which has no Python 3.14 wheels; keep them optional.
+    imported["normalize"] = None
+    imported["StarDist2D"] = None
+    if profile == "nuclei":
+        try:
+            imported["normalize"] = importlib.import_module("csbdeep.utils").normalize
+            imported["StarDist2D"] = importlib.import_module("stardist.models").StarDist2D
+        except ImportError:
+            print("StarDist/CSBDeep not available (trig_stardist cannot be used in this environment).")
+    imported["mr"] = importlib.import_module("meshlib.mrmeshpy") if profile == "nuclei" else None
+    imported["mrn"] = importlib.import_module("meshlib.mrmeshnumpy") if profile == "nuclei" else None
+    imported["clear_output"] = importlib.import_module("IPython.display").clear_output if profile == "nuclei" else None
+    imported["meshio"] = importlib.import_module("meshio") if profile == "nuclei" else None
+    imported["tetgen"] = importlib.import_module("tetgen") if profile == "nuclei" else None
+    imported["xlsxwriter"] = importlib.import_module("xlsxwriter") if profile == "nuclei" else None
+    imported["PILImage"] = importlib.import_module("PIL.Image").Image if profile == "nuclei" else None
+
+    if profile == "nuclei":
+        reportlab_platypus = importlib.import_module("reportlab.platypus")
+        imported["RLImage"] = reportlab_platypus.Image
+        imported["SimpleDocTemplate"] = reportlab_platypus.SimpleDocTemplate
+        imported["Image"] = reportlab_platypus.Image
+        imported["Paragraph"] = reportlab_platypus.Paragraph
+        imported["Spacer"] = reportlab_platypus.Spacer
+        imported["Table"] = reportlab_platypus.Table
+        imported["TableStyle"] = reportlab_platypus.TableStyle
+        imported["PageBreak"] = reportlab_platypus.PageBreak
+
+        reportlab_pagesizes = importlib.import_module("reportlab.lib.pagesizes")
+        imported["A4"] = reportlab_pagesizes.A4
+        imported["inch"] = importlib.import_module("reportlab.lib.units").inch
+        imported["getSampleStyleSheet"] = importlib.import_module("reportlab.lib.styles").getSampleStyleSheet
+        imported["colors"] = importlib.import_module("reportlab.lib.colors")
+    else:
+        imported["RLImage"] = None
+        imported["SimpleDocTemplate"] = None
+        imported["Image"] = None
+        imported["Paragraph"] = None
+        imported["Spacer"] = None
+        imported["Table"] = None
+        imported["TableStyle"] = None
+        imported["PageBreak"] = None
+        imported["A4"] = None
+        imported["inch"] = None
+        imported["getSampleStyleSheet"] = None
+        imported["colors"] = None
+
+    get_settings = importlib.import_module("napari.settings").get_settings
+    imported["get_settings"] = get_settings
+    settings = get_settings()
+    imported["settings"] = settings
+    imported["resolve_stardist_flag"] = resolve_stardist_flag
+
+    if enable_napari_interactive:
+        settings.application.ipy_interactive = True
+
+    hide_harmless_qt_warnings()
+    return imported
+
+
+def load_ld_notebook_setup(enable_napari_interactive: bool = True) -> dict[str, Any]:
+    """Load the LD notebook imports in one step."""
+    check_python_version()
+    try:
+        from IPython import get_ipython
+
+        ipython = get_ipython()
+        if ipython is not None:
+            ipython.run_line_magic("gui", "qt")
+    except Exception:
+        pass
+
+    cv2 = importlib.import_module("cv2")
+
+    imported = load_common_imports(
+        profile="ld",
+        enable_napari_interactive=enable_napari_interactive,
+    )
+    imported["cv2"] = cv2
+    imported["tqdm"] = importlib.import_module("tqdm.auto").tqdm
+    imported["clear_output"] = importlib.import_module("IPython.display").clear_output
+    print("Libraries loaded successfully.")
+    return imported
+
+
+def load_nuclei_notebook_setup(enable_napari_interactive: bool = True) -> dict[str, Any]:
+    """Load the nuclei notebook imports in one step."""
+    check_python_version()
+    try:
+        from IPython import get_ipython
+
+        ipython = get_ipython()
+        if ipython is not None:
+            ipython.run_line_magic("gui", "qt")
+    except Exception:
+        pass
+
+    cv2 = importlib.import_module("cv2")
+
+    imported = load_common_imports(
+        profile="nuclei",
+        enable_napari_interactive=enable_napari_interactive,
+    )
+    imported["cv2"] = cv2
+    imported["tqdm"] = importlib.import_module("tqdm.auto").tqdm
+    print("Libraries loaded successfully.")
+    return imported
