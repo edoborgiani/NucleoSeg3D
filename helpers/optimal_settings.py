@@ -15,8 +15,6 @@ here from ``optimal_settings_v1.6.4.json`` (next to this file):
   split, rescue of missed nuclei, edges) is the validated value.
 
 Any of them can still be changed by name with ``custom_settings`` (Cell 4).
-The full validation notebook (`NucleoSeg3D_v1.6.4_validation.ipynb`)
-exposes them all.
 """
 
 import json

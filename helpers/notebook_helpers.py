@@ -2370,7 +2370,7 @@ def _compute_automatic_contrast_limits(im_view, method="legacy"):
     - Cont_max: the intensity below which 99% of pixels fall, so the top 1%
       brightest (often saturated/outlier) pixels don't wash out the contrast.
 
-    ``method='calibrated'`` (v1.6.6, ``automatic_contrast='calibrated'``),
+    ``method='calibrated'`` (v1.6.4, ``automatic_contrast='calibrated'``),
     fitted on the nuclei ground truths of EB-019 and AGG-CADHERIN-INTEGRIN_002
     (validation/tune_segmentation.py):
 
@@ -2417,7 +2417,7 @@ def calibrated_contrast(im_channel):
 
 
 def suggest_contrast_settings(im_in, stain_complete_df, current=None, warn_noise=1.0):
-    """Suggested contrast/gamma per channel, and a check of the chosen ones (v1.6.6).
+    """Suggested contrast/gamma per channel, and a check of the chosen ones (v1.6.4).
 
     The suggestion is the ``'calibrated'`` rule of
     :func:`_compute_automatic_contrast_limits` (Gamma 1.0). With ``current``
@@ -2498,11 +2498,11 @@ def prepare_stain_settings(
         histogram (see ``_compute_automatic_contrast_limits``); ``Gamma``
         stays at the default 1.0. Has no effect when a setup CSV is reused
         (``use_setup=True`` and the file exists) — that path never opens a
-        viewer to begin with. ``'calibrated'`` (v1.6.6) uses the rule
+        viewer to begin with. ``'calibrated'`` (v1.6.4) uses the rule
         calibrated on the nuclei ground truths instead (see
         ``_compute_automatic_contrast_limits``).
     suggest_contrast : bool, optional
-        v1.6.6. The napari setup viewer opens with every channel at the
+        v1.6.4. The napari setup viewer opens with every channel at the
         calibrated suggestion (instead of its full range), as a starting point
         to adjust; and the chosen (or reused) values are checked against the
         suggestion (:func:`suggest_contrast_settings`), with a note for each
@@ -2591,7 +2591,7 @@ def prepare_stain_settings(
                     blending="additive",
                     scale=(r_xyz[2], r_xyz[1], r_xyz[0]) if r_xyz is not None else None,
                 )
-                if suggest_contrast:  # v1.6.6: start from the calibrated suggestion
+                if suggest_contrast:  # v1.6.4: start from the calibrated suggestion
                     layer.contrast_limits_range = (0, 255)
                     layer.contrast_limits = _compute_automatic_contrast_limits(
                         im_view, "calibrated")
@@ -2642,7 +2642,7 @@ def prepare_stain_settings(
     stain_complete_df = stain_complete_df.loc[stain_df.index]
     stain_complete_df = stain_complete_df[["Marker", "Laser", "Color", "Cont_min", "Cont_max", "Gamma"]]
     original_stain_complete_df = stain_complete_df.copy()
-    if suggest_contrast:  # v1.6.6: check the chosen values against the suggestion
+    if suggest_contrast:  # v1.6.4: check the chosen values against the suggestion
         check = suggest_contrast_settings(im_in, stain_complete_df, current=stain_complete_df)
         flagged = check[check["Check"] != "ok"]
         print("Contrast check against the calibrated suggestion: "
@@ -6326,7 +6326,7 @@ def _slice_background(plane, radius_px, percentile):
 
 def correct_z_background(image_stack, radius_um, voxel_size_zyx, percentile=25.0,
                          channels=None):
-    """Remove the background haze slice by slice (v1.6.5).
+    """Remove the background haze slice by slice (v1.6.4).
 
     Out-of-focus light makes some Z slices (typically the first ones, near
     the coverslip) brighter than the rest, and the threshold then takes the
@@ -6415,7 +6415,7 @@ def _robust_depth_fit(z, y, model, n_iter=5):
 
 def estimate_z_attenuation(channel_zyx, model="exp", signal_percentile=99.9,
                            bg_percentile=25.0, max_gain=5.0, strength=1.0):
-    """Depth profile of the signal of one (Z, Y, X) channel (v1.6.6).
+    """Depth profile of the signal of one (Z, Y, X) channel (v1.6.4).
 
     In confocal stacks the excitation and the emitted light are attenuated
     on their way through the sample, so the nuclei of the deep slices are
@@ -6467,7 +6467,7 @@ def estimate_z_attenuation(channel_zyx, model="exp", signal_percentile=99.9,
 def correct_z_attenuation(image_stack, model="exp", strength=1.0, channels=None,
                           signal_percentile=99.9, bg_percentile=25.0, max_gain=5.0,
                           inplace=False):
-    """Compensate the loss of signal with depth, slice by slice (v1.6.6).
+    """Compensate the loss of signal with depth, slice by slice (v1.6.4).
 
     For every channel the depth profile is estimated
     (:func:`estimate_z_attenuation`) and every Z slice is rescaled around its
@@ -6558,7 +6558,7 @@ def plot_z_attenuation(profiles, names=None, voxel_z=None, show=True):
 
 
 def trim_flared_slices(labels, factor):
-    """Trim the Z slices where a nucleus flares out (v1.6.5).
+    """Trim the Z slices where a nucleus flares out (v1.6.4).
 
     Blurred nuclei, in the first/last slices especially, can spread far
     wider in a few slices than in the rest of the nucleus. For every label,
@@ -8361,7 +8361,7 @@ def _basin_saddles(basins, surface, n_basins):
 def split_nuclei_by_saddles(labels, intensity, spacing_zyx, nuclei_diameter, max_dip=0.8,
                             smooth_fraction=0.1, seed_separation=0.5, min_piece_fraction=0.25,
                             background=None):
-    """v1.6.7: split labels that hold several nuclei, where the image shows an
+    """v1.6.4: split labels that hold several nuclei, where the image shows an
     intensity valley between them.
 
     Inside every label, the intensity (smoothed by ``smooth_fraction`` x
@@ -8514,7 +8514,7 @@ def typical_nucleus_shape(labels, spacing_zyx):
 
 def split_tall_nuclei(labels, intensity, spacing_zyx, volume_factor=1.3, elongation_factor=1.3,
                       max_pieces=4, min_piece_fraction=0.4):
-    """v1.6.7: size-aware split of nuclei stacked along Z with no visible seam.
+    """v1.6.4: size-aware split of nuclei stacked along Z with no visible seam.
 
     The typical nucleus of the image is measured from its own labels
     (`typical_nucleus_shape`: median volume and median Z/XY elongation). A
@@ -8581,7 +8581,7 @@ def split_tall_nuclei(labels, intensity, spacing_zyx, volume_factor=1.3, elongat
 
 def refine_nuclei_boundaries(labels, intensity, spacing_zyx, edge_fraction=0.3, margin_um=1.0,
                              background=None, peak_percentile=95, smooth_um=0.3):
-    """v1.6.7: redraw every nucleus edge at ``edge_fraction`` of its own peak.
+    """v1.6.4: redraw every nucleus edge at ``edge_fraction`` of its own peak.
 
     A single threshold cuts dim nuclei too small and leaves bright ones too
     big (and too long in Z, where the axial blur keeps them above the
@@ -8656,7 +8656,7 @@ def refine_nuclei_boundaries(labels, intensity, spacing_zyx, edge_fraction=0.3, 
 
 def rescue_missed_nuclei(labels, intensity, spacing_zyx, min_contrast=0.25, grow_fraction=0.35,
                          background=None, min_volume_fraction=0.25, max_volume_fraction=2.0):
-    """v1.6.8: add back nuclei the threshold mask missed (small, dim ones).
+    """v1.6.4: add back nuclei the threshold mask missed (small, dim ones).
 
     The typical nucleus of the image is measured from its own labels
     (`typical_nucleus_shape`). Nucleus-sized bright spots are found with a
@@ -8730,7 +8730,7 @@ def rescue_missed_nuclei(labels, intensity, spacing_zyx, min_contrast=0.25, grow
     return out, n_added
 
 
-# v1.6.9: what the settings of validation_tuning/multi_v168/best_settings.json
+# v1.6.4: what the settings of validation_tuning/multi_v168/best_settings.json
 # were tuned for. On EB-019 (0.33 um pixels) and AGG (0.21 um), both at
 # scale_factor 0.5, a nucleus of 8 um spanned 12 and 19 voxels: the voxel-based
 # settings (sigma, gradient smoothing, minimum piece size...) are validated in
@@ -8766,7 +8766,7 @@ def _profile_extent(profile, centre, level, rise):
 
 def measure_nuclei_in_image(nuclei_zyx, voxel_size_zyx, contrast=None, edge_level=0.3,
                             work_um=0.5, min_peak=0.15, max_candidates=600, verbose=True):
-    """v1.6.9: typical nucleus of an image, measured from the image alone.
+    """v1.6.4: typical nucleus of an image, measured from the image alone.
 
     ``nuclei_zyx`` is the NUCLEI channel on its original grid (any range); it
     is normalized to 0-255 like Cell 9 and, with ``contrast`` =
@@ -8842,7 +8842,7 @@ def measure_nuclei_in_image(nuclei_zyx, voxel_size_zyx, contrast=None, edge_leve
     slice_bg = np.percentile(sm[:, ::2, ::2].reshape(sm.shape[0], -1), 25, axis=1)
     out = {"n_measured": len(rows), "n_candidates": int(len(order)), "background": bg,
            "noise": noise, "edge_level": edge_level,
-           # v1.7.0: for measure_image_features (um, original grid)
+           # v1.6.4: for measure_image_features (um, original grid)
            "centres_um": pts[order] * spacing if len(order) else np.zeros((0, 3)),
            "clean_mask": clean}
     if rows:
@@ -8869,7 +8869,7 @@ def measure_nuclei_in_image(nuclei_zyx, voxel_size_zyx, contrast=None, edge_leve
 
 
 def _edge_profile_stats(profile, centre, bg, peak, rise, floor=0.05):
-    """v1.7.0: steepest-edge level and 80-20% edge width (in steps) of a
+    """v1.6.4: steepest-edge level and 80-20% edge width (in steps) of a
     nucleus profile, on both sides of ``centre``.
 
     Walks outwards until the profile drops below ``bg + floor x (peak - bg)``;
@@ -8917,7 +8917,7 @@ def _edge_profile_stats(profile, centre, bg, peak, rise, floor=0.05):
 def measure_image_features(nuclei_zyx, voxel_size_zyx, contrast=None, measurement=None,
                            smooth_um=0.3, work_um=0.5, min_peak=0.15, max_candidates=600,
                            verbose=True):
-    """v1.7.0: image properties that the threshold / edge / split settings may
+    """v1.6.4: image properties that the threshold / edge / split settings may
     depend on, measured from the image alone (no ground truth).
 
     The nucleus centres are those of `measure_nuclei_in_image` (found on the
@@ -9036,7 +9036,7 @@ def measure_image_features(nuclei_zyx, voxel_size_zyx, contrast=None, measuremen
 def adapt_nuclei_settings(measurement, settings, voxel_size_zyx, reference=None,
                           min_measured=15, adapt_scale=True, diameter_tolerance=0.1,
                           verbose=True):
-    """v1.6.9: adapt the NUCLEI settings to the nuclei measured in the image.
+    """v1.6.4: adapt the NUCLEI settings to the nuclei measured in the image.
 
     ``settings``: dict with at least ``nuclei_diameter`` and ``scale_factor``
     (and optionally the um settings of ``reference['um_settings']``), e.g.
@@ -9117,7 +9117,7 @@ def adapt_nuclei_settings(measurement, settings, voxel_size_zyx, reference=None,
 def adapt_settings_to_image(original_image, stain_complete_df, voxel_size_zyx, settings,
                             condition="NUCLEI", adapt_scale=True, verbose=True,
                             with_features=False):
-    """v1.6.9: `measure_nuclei_in_image` + `adapt_nuclei_settings` for the
+    """v1.6.4: `measure_nuclei_in_image` + `adapt_nuclei_settings` for the
     notebook (Cell 8b) and the batch mode.
 
     ``original_image``: (Z, Y, X, C) 'Original image' of the stack (Cell 7),
@@ -9125,7 +9125,7 @@ def adapt_settings_to_image(original_image, stain_complete_df, voxel_size_zyx, s
     channel is measured with its ``Cont_min`` / ``Cont_max`` / ``Gamma``
     (Cell 8, chosen by the user or automatic). ``settings``: dict with
     ``nuclei_diameter``, ``scale_factor`` and the um settings to scale.
-    Returns ``(adapted settings, changes)``; v1.7.0, ``with_features``:
+    Returns ``(adapted settings, changes)``; v1.6.4, ``with_features``:
     ``(adapted settings, changes, features)`` with the image features of
     `measure_image_features` and the nucleus measurement (for the record;
     they do not change any setting).
@@ -9152,7 +9152,7 @@ def postprocess_nuclei_labels(labels, intensity, spacing_zyx, nuclei_diameter,
                               tall_elongation_factor=0.0, rescue_contrast=0.0,
                               rescue_grow_fraction=0.35, edge_fraction=0.0, edge_margin_um=1.0,
                               expand_um=0.0, verbose=True):
-    """v1.6.8: the steps after the watershed and size refinement, in order.
+    """v1.6.4: the steps after the watershed and size refinement, in order.
 
     flare trim -> saddle split -> tall split -> rescue of missed nuclei ->
     per-nucleus edges -> label growth. Each step is off at 0 (see
@@ -9343,34 +9343,34 @@ def segment_nuclei(
         nuclei that come out narrower than they are (threshold too tight at
         the edge). Default 0 = off.
     nuclei_flare_trim_factor : float
-        v1.6.5, 3D images. Cut back the Z slices where a nucleus is wider
+        v1.6.4, 3D images. Cut back the Z slices where a nucleus is wider
         than this x its median cross-section (blur flaring, typically in the
         first slices); see `trim_flared_slices`. Applied before
         ``nuclei_expand_um``. Default 0 = off.
     nuclei_saddle_dip : float
-        v1.6.7, 3D NUCLEI channel. Split a label where the intensity between
+        v1.6.4, 3D NUCLEI channel. Split a label where the intensity between
         two of its peaks drops below this x the dimmer peak (e.g. two nuclei
         stacked in Z); see `split_nuclei_by_saddles`. 0.8 matched the ground
         truths best. Default 0 = off.
     nuclei_edge_fraction : float
-        v1.6.7, 3D NUCLEI channel. Redraw every nucleus edge at this fraction
+        v1.6.4, 3D NUCLEI channel. Redraw every nucleus edge at this fraction
         of its own peak intensity (within ``nuclei_edge_margin_um`` of the
         label); see `refine_nuclei_boundaries`. 0.3 matched the ground truths
         best. Default 0 = off.
     nuclei_edge_margin_um : float
         How far (um) ``nuclei_edge_fraction`` may move an edge outwards.
     nuclei_tall_volume_factor, nuclei_tall_elongation_factor : float
-        v1.6.7, 3D. Size-aware split (`split_tall_nuclei`): a label more
+        v1.6.4, 3D. Size-aware split (`split_tall_nuclei`): a label more
         elongated in Z than ``nuclei_tall_elongation_factor`` x the image's
         typical elongation (and bigger than ``nuclei_tall_volume_factor`` x
         its typical volume) is cut into stacked nuclei; normal labels, and big
         ones that are not taller, are left alone. Runs after the saddle split,
-        before the edge refinement. v1.6.8: the elongation is the switch
+        before the edge refinement. v1.6.4: the elongation is the switch
         (default 0 = off; 1.2 matched the ground truths); the volume factor
         hardly matters (1.15-1.6 gave the same labels) and defaults to 1.15.
-        Either at 0 = off (a v1.6.7 setting with the volume factor 0 stays off).
+        Either at 0 = off (a v1.6.4 setting with the volume factor 0 stays off).
     nuclei_rescue_contrast, nuclei_rescue_grow_fraction : float
-        v1.6.8, 3D. Add back nuclei the threshold missed
+        v1.6.4, 3D. Add back nuclei the threshold missed
         (`rescue_missed_nuclei`): nucleus-sized bright spots away from every
         label, brighter than ``nuclei_rescue_contrast`` x the median nucleus
         peak (above background), each grown to ``nuclei_rescue_grow_fraction``
@@ -11237,7 +11237,7 @@ def edit_stain_dict(channels, name_setup=None, use_saved=True):
     return editor
 
 
-# v1.6.8: NUCLEI settings of the nuclei notebook v1.6.4-v1.6.8 for the batch
+# v1.6.4: NUCLEI settings of the nuclei notebook v1.6.4 for the batch
 # mode (`run_batch_folder(nuclei_options=...)`), at their "off" values: the
 # depth correction (Cell 10), the slice-wise haze removal (Cell 12), the
 # threshold weights (Cell 15) and the segment_nuclei options (Cell 17).
@@ -11249,7 +11249,7 @@ BATCH_NUCLEI_OPTIONS = {
     "nuclei_saddle_dip": 0.0, "nuclei_edge_fraction": 0.0, "nuclei_edge_margin_um": 1.0,
     "nuclei_tall_volume_factor": 1.15, "nuclei_tall_elongation_factor": 0.0,
     "nuclei_rescue_contrast": 0.0, "nuclei_rescue_grow_fraction": 0.35,
-    "auto_adapt": False,  # v1.6.9: adapt the settings to each image (adapt_settings_to_image)
+    "auto_adapt": False,  # v1.6.4: adapt the settings to each image (adapt_settings_to_image)
     # v1.6.4: "calibrated" = NUCLEI contrast of every image from its own
     # histogram (`calibrated_contrast`), whatever the setup / automatic_contrast
     "nuclei_contrast": None,
@@ -11309,7 +11309,7 @@ def _process_single_image_batch(
     (this image's own subfolder of the batch output folder).
     ``split_gamma``, ``split_gamma_step`` and ``min_piece_fraction`` are the
     nuclei notebook v1.6.3 splitting settings (defaults: off, as in v1.6.2).
-    ``nuclei_options``: the v1.6.4-v1.6.8 NUCLEI settings, see
+    ``nuclei_options``: the v1.6.4 NUCLEI settings, see
     `BATCH_NUCLEI_OPTIONS` (missing keys = off)."""
     opts = dict(BATCH_NUCLEI_OPTIONS, **(nuclei_options or {}))
     unknown = set(opts) - set(BATCH_NUCLEI_OPTIONS)
@@ -11362,7 +11362,7 @@ def _process_single_image_batch(
     elif opts["nuclei_contrast"] not in (None, "calibrated"):
         raise ValueError("nuclei_options['nuclei_contrast'] must be None or 'calibrated'")
     adapted_note = "off"
-    if opts["auto_adapt"] and not is_2d and "NUCLEI" in stain_complete_df.index:  # v1.6.9
+    if opts["auto_adapt"] and not is_2d and "NUCLEI" in stain_complete_df.index:  # v1.6.4
         adapted, changes = adapt_settings_to_image(
             im_final_stack['Original image'], stain_complete_df, (r_Z, r_Y, r_X),
             {"nuclei_diameter": nuclei_diameter, "scale_factor": scale_factor,
@@ -11378,7 +11378,7 @@ def _process_single_image_batch(
         adapted_note = "; ".join(f"{n} {o} -> {v}" for n, o, v, _ in changes) or "no change"
 
     # Cells 10-16
-    if opts["z_atten_model"] != "off" and im_final_stack['Original image'].shape[0] > 2:  # v1.6.6
+    if opts["z_atten_model"] != "off" and im_final_stack['Original image'].shape[0] > 2:  # v1.6.4
         conds = list(stain_complete_df.index) if opts["z_atten_conditions"] == "all" else \
             [c for c in opts["z_atten_conditions"] if c in stain_complete_df.index]
         im_final_stack['Original image'], _ = correct_z_attenuation(
@@ -11391,7 +11391,7 @@ def _process_single_image_batch(
     )
     im_final_stack = run_denoise(im_final_stack, stain_complete_df=stain_complete_df)
     if opts["z_bg_radius_um"] > 0 and im_final_stack['Denoised image'].shape[0] > 1 \
-            and "NUCLEI" in stain_complete_df.index:  # v1.6.5
+            and "NUCLEI" in stain_complete_df.index:  # v1.6.4
         im_final_stack['Denoised image'] = correct_z_background(
             im_final_stack['Denoised image'], opts["z_bg_radius_um"], (r_zZ, r_zY, r_zX),
             percentile=opts["z_bg_percentile"],
@@ -11437,7 +11437,7 @@ def _process_single_image_batch(
             'Split gamma step': split_gamma_step,
             'Min split piece fraction': min_piece_fraction,
             **{f"Nuclei option {k}": v for k, v in opts.items()},
-            'Settings adapted to the image (v1.6.9)': adapted_note,
+            'Settings adapted to the image (v1.6.4)': adapted_note,
         },
     )
 
@@ -11637,11 +11637,11 @@ def run_batch_folder(
     pipeline and write each image's outputs into its own subfolder,
     ``<input_folder>_output/<image stem>/``.
 
-    ``nuclei_options`` (v1.6.8): the NUCLEI settings added in the nuclei
-    notebook v1.6.4-v1.6.8 (depth correction, haze removal, threshold
+    ``nuclei_options`` (v1.6.4): the NUCLEI settings added in the nuclei
+    notebook v1.6.4 (depth correction, haze removal, threshold
     weights, Z elongation, flare trim, saddle / tall split, rescue, edges,
     label growth) as a dict - keys and "off" values in
-    `BATCH_NUCLEI_OPTIONS`; missing keys stay off. Before v1.6.8 the batch
+    `BATCH_NUCLEI_OPTIONS`; missing keys stay off. Before v1.6.4 the batch
     mode ran without them.
 
     Each file goes through the same steps as the single-file notebook
