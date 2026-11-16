@@ -1228,7 +1228,9 @@ def get_cyto_split_config(profile="balanced", **overrides):
 
 def hist_plot(im_in, stain_complete_df, thresh=0, legend=False):
     """Plot histogram and CDF for each channel."""
-    fig, axs = plt.subplots(1, im_in.shape[3], figsize=(15, 2))
+    # squeeze=False: one channel gives a list of one axis too, not a bare Axes
+    fig, axs = plt.subplots(1, im_in.shape[3], figsize=(15, 2), squeeze=False)
+    axs = axs[0]
     for c in range(im_in.shape[3]):
         hist, _ = np.histogram(im_in[:, :, :, c].flatten(), 256, [0, 256])
         cdf = hist.cumsum()
@@ -1266,7 +1268,8 @@ def hist_plot_with_thresholds(im_in, stain_complete_df, global_thresholds, combi
     global_thresholds, combined_thresholds : sequence of float
         One value per channel, in the same order as `stain_complete_df.index`.
     """
-    fig, axs = plt.subplots(1, im_in.shape[3], figsize=(15, 2))
+    fig, axs = plt.subplots(1, im_in.shape[3], figsize=(15, 2), squeeze=False)
+    axs = axs[0]  # one channel: still a list of axes
     for c in range(im_in.shape[3]):
         idx = stain_complete_df.index[c]
         color = stain_complete_df.loc[idx, "Color"]
@@ -2352,7 +2355,7 @@ def _normalize_channel_to_uint8_view(im_channel):
     return ((im_channel - imin) / (imax - imin) * 255).clip(0, 255).astype(np.uint8)
 
 
-def _compute_automatic_contrast_limits(im_view):
+def _compute_automatic_contrast_limits(im_view, method="legacy"):
     """Pick (Cont_min, Cont_max) for one channel from its intensity histogram.
 
     ``im_view`` is the same per-channel min-max stretch to [0, 255] used for
@@ -2360,11 +2363,37 @@ def _compute_automatic_contrast_limits(im_view):
     ``Cont_min``/``Cont_max`` are interpreted against downstream (napari
     contrast limits, then ``run_normalize()`` + ``apply_contrast_gamma_per_channel``).
 
+    ``method='legacy'`` (``automatic_contrast=True``):
+
     - Cont_min: one above the histogram peak (the background/noise floor in
       a typical fluorescence image), to exclude background.
     - Cont_max: the intensity below which 99% of pixels fall, so the top 1%
       brightest (often saturated/outlier) pixels don't wash out the contrast.
+
+    ``method='calibrated'`` (v1.6.6, ``automatic_contrast='calibrated'``),
+    fitted on the nuclei ground truths of EB-019 and AGG-CADHERIN-INTEGRIN_002
+    (validation/tune_segmentation.py):
+
+    - Cont_min = background - 0.25 x noise (background = median, noise =
+      1.4826 x MAD). The segmentation is very sensitive to it: the tuned
+      optimum sat at the background on both images, and 10 grey levels off
+      it cost most of the score.
+    - Cont_max = background + 2 x (99.95th percentile - background): well
+      above the brightest nuclei. The score was flat above ~the 99.95th
+      percentile, while the legacy 99th percentile saturated the nuclei.
     """
+    if method == "calibrated":
+        sample = im_view[::2, ::2, ::2] if im_view.ndim == 3 and im_view.size > 4_000_000 \
+            else im_view
+        sample = sample.astype(np.float32).ravel()
+        bg = float(np.median(sample))
+        noise = 1.4826 * float(np.median(np.abs(sample - bg)))
+        p_hi = float(np.percentile(sample, 99.95))
+        cont_min = int(np.clip(round(bg - 0.25 * noise), 0, 254))
+        cont_max = int(np.clip(round(bg + 2.0 * (p_hi - bg)), cont_min + 1, 255))
+        return cont_min, cont_max
+    if method != "legacy":
+        raise ValueError(f"method must be 'legacy' or 'calibrated', not {method!r}")
     hist_counts = np.bincount(im_view.ravel(), minlength=256)
     peak_value = int(np.argmax(hist_counts))
     cont_min = min(255, peak_value + 1)
@@ -2372,6 +2401,73 @@ def _compute_automatic_contrast_limits(im_view):
     if cont_max <= cont_min:
         cont_max = min(255, cont_min + 1)
     return cont_min, cont_max
+
+
+def calibrated_contrast(im_channel):
+    """v1.6.4: ``{"Cont_min", "Cont_max", "Gamma"}`` of one channel (Z, Y, X)
+    from its own histogram, with the ``'calibrated'`` rule of
+    `_compute_automatic_contrast_limits` (Gamma 1.0), on the same 0-255
+    min-max scale as the stain table. Used for the NUCLEI channel of an image
+    the tuned settings were not tuned on: its Cont_min lands at the
+    background, where the tuned values sat on all four ground truths (within
+    1-3 grey levels); gamma 0.8-1.25 changed the score by < 0.02."""
+    lo, hi = _compute_automatic_contrast_limits(_normalize_channel_to_uint8_view(im_channel),
+                                                method="calibrated")
+    return {"Cont_min": int(lo), "Cont_max": int(hi), "Gamma": 1.0}
+
+
+def suggest_contrast_settings(im_in, stain_complete_df, current=None, warn_noise=1.0):
+    """Suggested contrast/gamma per channel, and a check of the chosen ones (v1.6.6).
+
+    The suggestion is the ``'calibrated'`` rule of
+    :func:`_compute_automatic_contrast_limits` (Gamma 1.0). With ``current``
+    (a stain table with ``Cont_min``/``Cont_max``/``Gamma``, e.g. the one read
+    from the setup CSV or set in napari), every channel whose ``Cont_min`` is
+    more than ``warn_noise`` x the background noise away from the background,
+    whose ``Cont_max`` is below the 99.95th percentile (bright nuclei
+    saturated), or whose gamma is outside 0.7-1.3 is flagged.
+
+    Parameters
+    ----------
+    im_in : ndarray (Z, Y, X, C)
+        Original image (channels in the order of ``stain_complete_df``).
+    stain_complete_df : DataFrame
+        One row per channel (index: Condition, or Condition/Marker/Laser).
+
+    Returns
+    -------
+    DataFrame, one row per channel: background, noise, p99.95, suggested
+    Cont_min/Cont_max/Gamma and, with ``current``, the chosen values and
+    a ``Check`` column.
+    """
+    rows = []
+    for c, idx in enumerate(stain_complete_df.index):
+        view = _normalize_channel_to_uint8_view(im_in[:, :, :, c])
+        sample = (view[::2, ::2, ::2] if view.size > 4_000_000 else view).astype(np.float32).ravel()
+        bg = float(np.median(sample))
+        noise = 1.4826 * float(np.median(np.abs(sample - bg)))
+        p_hi = float(np.percentile(sample, 99.95))
+        s_min, s_max = _compute_automatic_contrast_limits(view, method="calibrated")
+        cond = idx[0] if isinstance(idx, tuple) else idx
+        row = {"Condition": cond, "Background": round(bg, 1), "Noise": round(noise, 2),
+               "p99.95": round(p_hi, 1), "Suggested Cont_min": s_min,
+               "Suggested Cont_max": s_max, "Suggested Gamma": 1.0}
+        if current is not None:
+            cur = current.loc[idx]
+            cmin, cmax, gam = float(cur["Cont_min"]), float(cur["Cont_max"]), float(cur["Gamma"])
+            notes = []
+            if abs(cmin - bg) > warn_noise * max(noise, 1.0):
+                notes.append(f"Cont_min {cmin:g} is {(cmin - bg) / max(noise, 1.0):+.1f} noise "
+                             f"from the background ({bg:g}): try ~{s_min}")
+            if cmax < p_hi:
+                notes.append(f"Cont_max {cmax:g} < p99.95 ({p_hi:g}): bright nuclei saturate, "
+                             f"try ~{s_max}")
+            if not 0.7 <= gam <= 1.3:
+                notes.append(f"Gamma {gam:g} is far from 1")
+            row.update({"Cont_min": cmin, "Cont_max": cmax, "Gamma": gam,
+                        "Check": "; ".join(notes) or "ok"})
+        rows.append(row)
+    return pd.DataFrame(rows).set_index("Condition")
 
 
 def prepare_stain_settings(
@@ -2384,6 +2480,7 @@ def prepare_stain_settings(
     r_xyz=None,
     automatic_contrast=False,
     progress=None,
+    suggest_contrast=False,
 ):
     """Load or interactively collect contrast/gamma settings for each channel.
 
@@ -2401,8 +2498,19 @@ def prepare_stain_settings(
         histogram (see ``_compute_automatic_contrast_limits``); ``Gamma``
         stays at the default 1.0. Has no effect when a setup CSV is reused
         (``use_setup=True`` and the file exists) — that path never opens a
-        viewer to begin with.
+        viewer to begin with. ``'calibrated'`` (v1.6.6) uses the rule
+        calibrated on the nuclei ground truths instead (see
+        ``_compute_automatic_contrast_limits``).
+    suggest_contrast : bool, optional
+        v1.6.6. The napari setup viewer opens with every channel at the
+        calibrated suggestion (instead of its full range), as a starting point
+        to adjust; and the chosen (or reused) values are checked against the
+        suggestion (:func:`suggest_contrast_settings`), with a note for each
+        value far from it.
     """
+    if automatic_contrast not in (False, True, "calibrated"):
+        raise ValueError("automatic_contrast must be False, True or 'calibrated'")
+    auto_method = "calibrated" if automatic_contrast == "calibrated" else "legacy"
     stain_df = stain_df.reset_index(drop=False)
     stain_initial_df = stain_df.copy()
     stain_initial_df.set_index(["Condition", "Marker", "Laser"], inplace=True)
@@ -2444,15 +2552,18 @@ def prepare_stain_settings(
                 leave=False,
             ):
                 im_view = _normalize_channel_to_uint8_view(im_in[:, :, :, _])
-                cont_min, cont_max = _compute_automatic_contrast_limits(im_view)
+                cont_min, cont_max = _compute_automatic_contrast_limits(im_view, auto_method)
                 stain_complete_df.loc[idx, "Cont_min"] = cont_min
                 stain_complete_df.loc[idx, "Cont_max"] = cont_max
                 stain_complete_df.loc[idx, "Gamma"] = 1.0
 
+            rule = ("background - 0.25 noise to background + 2 x (p99.95 - background), "
+                    "calibrated on the nuclei ground truths"
+                    if auto_method == "calibrated"
+                    else "histogram peak + 1 to the 99th percentile intensity")
             print(
-                "automatic_contrast is True — skipped the napari viewer and picked "
-                "Cont_min/Cont_max per channel automatically (histogram peak + 1 to "
-                "the 99th percentile intensity); Gamma left at 1.0."
+                f"automatic_contrast is {automatic_contrast!r} — skipped the napari viewer and "
+                f"picked Cont_min/Cont_max per channel automatically ({rule}); Gamma left at 1.0."
             )
         else:
             if settings is None:
@@ -2473,17 +2584,24 @@ def prepare_stain_settings(
                 leave=False,
             ):
                 im_view = _normalize_channel_to_uint8_view(im_in[:, :, :, _])
-                viewer.add_image(
+                layer = viewer.add_image(
                     im_view,
                     name=f"{idx[0]} ({idx[1]})",
                     colormap=_napari_colormap(stain_initial_df.loc[idx]["Color"]),
                     blending="additive",
                     scale=(r_xyz[2], r_xyz[1], r_xyz[0]) if r_xyz is not None else None,
                 )
+                if suggest_contrast:  # v1.6.6: start from the calibrated suggestion
+                    layer.contrast_limits_range = (0, 255)
+                    layer.contrast_limits = _compute_automatic_contrast_limits(
+                        im_view, "calibrated")
+                    layer.gamma = 1.0
 
             print(
                 "A napari window has opened — check it, adjust the contrast and gamma "
                 "for each channel, then close the window to continue."
+                + (" Each channel starts at the suggested (calibrated) contrast."
+                   if suggest_contrast else "")
             )
             _run_blocking_viewer(viewer, napari_module)
             settings.application.ipy_interactive = True
@@ -2524,6 +2642,13 @@ def prepare_stain_settings(
     stain_complete_df = stain_complete_df.loc[stain_df.index]
     stain_complete_df = stain_complete_df[["Marker", "Laser", "Color", "Cont_min", "Cont_max", "Gamma"]]
     original_stain_complete_df = stain_complete_df.copy()
+    if suggest_contrast:  # v1.6.6: check the chosen values against the suggestion
+        check = suggest_contrast_settings(im_in, stain_complete_df, current=stain_complete_df)
+        flagged = check[check["Check"] != "ok"]
+        print("Contrast check against the calibrated suggestion: "
+              + ("all channels ok." if flagged.empty else f"{len(flagged)} channel(s) to look at:"))
+        for cond, row in flagged.iterrows():
+            print(f"  {cond}: {row['Check']}")
     return stain_df, stain_complete_df, original_stain_complete_df
 
 
@@ -6182,6 +6307,297 @@ def apply_histogram_equalization_per_channel(image_stack, num_plateaus=2, platea
     return im_out
 
 
+def _slice_background(plane, radius_px, percentile):
+    """Smooth background of one 2D plane: a low percentile over a window of
+    ``2 * radius_px``, computed on a block-averaged copy (fast) and
+    interpolated back to the plane's size."""
+    h, w = plane.shape
+    d = max(1, int(radius_px // 8))
+    ph, pw = -h % d, -w % d
+    padded = np.pad(plane, ((0, ph), (0, pw)), mode='edge') if (ph or pw) else plane
+    small = padded.reshape(padded.shape[0] // d, d, padded.shape[1] // d, d).mean(axis=(1, 3))
+    win = max(3, int(round(2 * radius_px / d)) | 1)
+    bg = ndi.percentile_filter(small, percentile, size=win, mode='reflect')
+    bg = ndi.uniform_filter(bg, size=win, mode='reflect')
+    if d > 1:
+        bg = ndi.zoom(bg, d, order=1, mode='nearest')
+    return bg[:h, :w]
+
+
+def correct_z_background(image_stack, radius_um, voxel_size_zyx, percentile=25.0,
+                         channels=None):
+    """Remove the background haze slice by slice (v1.6.5).
+
+    Out-of-focus light makes some Z slices (typically the first ones, near
+    the coverslip) brighter than the rest, and the threshold then takes the
+    haze around the nuclei for nucleus: the nuclei of those slices come out
+    too large and merged. For every Z slice the local background - the
+    ``percentile``-th percentile of the intensity within ``radius_um`` - is
+    estimated and subtracted, and the stack's median background level is
+    added back, so the intensity scale (and the contrast settings) stay
+    comparable.
+
+    Parameters
+    ----------
+    image_stack : ndarray (Z, Y, X, C)
+    radius_um : float
+        Size of the background window, in um (several nuclei across, e.g.
+        15-40). 0 = off (input returned unchanged). A value larger than the
+        image (e.g. 1000) uses one background level per slice.
+    voxel_size_zyx : tuple
+        Voxel size (Z, Y, X) of ``image_stack`` in um.
+    percentile : float
+        Percentile of the intensity taken as background (default 25; must
+        stay below the fraction of the window that is background).
+    channels : iterable of int, optional
+        Channels to correct (default all).
+    """
+    if not radius_um or radius_um <= 0:
+        return image_stack
+    im_out = image_stack.copy()
+    dtype = image_stack.dtype
+    hi = 255 if dtype == np.uint8 else None
+    radius_px = float(radius_um) / float(voxel_size_zyx[1])
+    whole_slice = radius_px >= max(image_stack.shape[1:3])
+    for c in (range(image_stack.shape[3]) if channels is None else channels):
+        ch = image_stack[:, :, :, c].astype(np.float32)
+        bg = np.empty_like(ch)
+        for z in range(ch.shape[0]):
+            if whole_slice:
+                bg[z] = np.percentile(ch[z], percentile)
+            else:
+                bg[z] = _slice_background(ch[z], radius_px, percentile)
+        ref = float(np.median(bg))
+        out = ch - (bg - ref)
+        out = np.clip(out, 0, hi) if hi is not None else np.maximum(out, 0)
+        im_out[:, :, :, c] = out.astype(dtype)
+    return im_out
+
+
+def _slice_signal_levels(ch, signal_percentile, bg_percentile, max_voxels=400_000):
+    """Per-Z-slice background (``bg_percentile``) and signal above it
+    (``signal_percentile`` - background) of a (Z, Y, X) channel. Large slices
+    are subsampled on a regular grid (percentiles barely change)."""
+    z_n = ch.shape[0]
+    step = max(1, int(np.sqrt(ch.shape[1] * ch.shape[2] / max_voxels)))
+    bg = np.empty(z_n, dtype=np.float64)
+    sig = np.empty(z_n, dtype=np.float64)
+    for z in range(z_n):
+        sl = np.asarray(ch[z, ::step, ::step], dtype=np.float32)
+        lo, hi = np.percentile(sl, [bg_percentile, signal_percentile])
+        bg[z], sig[z] = lo, hi - lo
+    return bg, sig
+
+
+def _robust_depth_fit(z, y, model, n_iter=5):
+    """Weighted least-squares line through (z, y) with Tukey bisquare
+    re-weighting, so slices off the trend (the sample's first/last, nearly
+    empty slices; a slice crossing a cluster) do not pull the fit.
+    ``model`` 'exp' fits log(y), 'linear' fits y. Returns the fitted y at z."""
+    ok = np.isfinite(y) & (y > 0)
+    if ok.sum() < 3:
+        return None
+    zz = z[ok].astype(float)
+    t = np.log(y[ok]) if model == "exp" else y[ok].astype(float)
+    w = np.ones_like(t)
+    coef = np.polyfit(zz, t, 1)
+    for _ in range(n_iter):
+        r = t - np.polyval(coef, zz)
+        s = 1.4826 * np.median(np.abs(r - np.median(r))) + 1e-9
+        u = r / (4.685 * s)
+        w = np.where(np.abs(u) < 1, (1 - u ** 2) ** 2, 0.0)
+        if w.sum() < 3:
+            break
+        coef = np.polyfit(zz, t, 1, w=np.sqrt(w))
+    fit = np.polyval(coef, z.astype(float))
+    return np.exp(fit) if model == "exp" else fit
+
+
+def estimate_z_attenuation(channel_zyx, model="exp", signal_percentile=99.9,
+                           bg_percentile=25.0, max_gain=5.0, strength=1.0):
+    """Depth profile of the signal of one (Z, Y, X) channel (v1.6.6).
+
+    In confocal stacks the excitation and the emitted light are attenuated
+    on their way through the sample, so the nuclei of the deep slices are
+    dimmer above the same background (in the EB-019 and AGG ground truths
+    the signal above background falls ~3x from the first to the last
+    slice), and a threshold set on the whole stack loses or shrinks them.
+
+    For every slice the background (``bg_percentile``) and the signal above
+    it (``signal_percentile`` - background; a very high percentile, so that
+    it measures the brightest nuclei of the slice whether the slice holds
+    few or many of them) are measured, and a smooth trend is fitted through
+    the signal along Z - robustly, so isolated slices off the trend are
+    ignored. No ground truth is used.
+
+    Parameters
+    ----------
+    model : {'exp', 'linear'}
+        'exp' (Beer-Lambert-like attenuation, default) or 'linear'.
+    max_gain : float
+        Largest gain given to a slice (protects nearly empty slices).
+    strength : float
+        Fraction of the correction applied: gain = (ref / fit) ** strength
+        (1 = full, 0 = none).
+
+    Returns
+    -------
+    dict with per-slice arrays ``bg``, ``signal``, ``fit``, ``gain`` and the
+    scalars ``model``, ``ratio_first_last`` (fitted first / last slice) and
+    ``decay_per_slice`` (fractional signal loss per slice).
+    """
+    z_n = channel_zyx.shape[0]
+    bg, sig = _slice_signal_levels(channel_zyx, signal_percentile, bg_percentile)
+    z = np.arange(z_n)
+    fit = _robust_depth_fit(z, sig, model) if z_n >= 3 else None
+    if fit is None:
+        fit = np.full(z_n, np.nanmax(sig) if np.isfinite(sig).any() else 1.0)
+    floor = max(np.nanmax(fit) / max_gain, 1e-6)
+    fit_c = np.maximum(fit, floor)
+    gain = (np.nanmax(fit_c) / fit_c) ** float(strength)
+    gain = np.clip(gain, 1.0, max_gain)
+    ratio = float(fit_c[0] / fit_c[-1]) if z_n > 1 else 1.0
+    decay = float(1 - ratio ** (-1.0 / (z_n - 1))) if z_n > 1 else 0.0
+    return {"model": model, "bg": bg, "signal": sig, "fit": fit_c, "gain": gain,
+            "ratio_first_last": ratio, "decay_per_slice": decay,
+            "strength": float(strength), "signal_percentile": signal_percentile,
+            "bg_percentile": bg_percentile}
+
+
+def correct_z_attenuation(image_stack, model="exp", strength=1.0, channels=None,
+                          signal_percentile=99.9, bg_percentile=25.0, max_gain=5.0,
+                          inplace=False):
+    """Compensate the loss of signal with depth, slice by slice (v1.6.6).
+
+    For every channel the depth profile is estimated
+    (:func:`estimate_z_attenuation`) and every Z slice is rescaled around its
+    own background so that its signal matches the brightest slice::
+
+        out[z] = bg[z] + (in[z] - bg[z]) * gain[z]
+
+    The background is left where it is (out-of-focus haze is removed by
+    :func:`correct_z_background`), and the result is clipped to the
+    channel's original range, so the 0-255 normalization - and the contrast
+    settings chosen on the original image - stay valid. Run it on the
+    original image, before ``run_normalize`` (Cell 9): there the deep slices
+    still have their full bit depth.
+
+    Parameters
+    ----------
+    image_stack : ndarray (Z, Y, X, C)
+    model : {'exp', 'linear', 'off'}
+        Shape of the depth trend; 'off' (or None) returns the input unchanged.
+    strength : float
+        Fraction of the correction (0-1, or above 1 to over-correct).
+    channels : iterable of int, optional
+        Channels to correct (default all).
+    inplace : bool
+        Correct ``image_stack`` itself (saves a copy of a large stack).
+
+    Returns
+    -------
+    corrected : ndarray (Z, Y, X, C), same dtype as the input
+    profiles : dict {channel index: profile dict}
+    """
+    if not model or model == "off" or image_stack.shape[0] < 3 or strength == 0:
+        return image_stack, {}
+    if model not in ("exp", "linear"):
+        raise ValueError(f"model must be 'exp', 'linear' or 'off', not {model!r}")
+    out = image_stack if inplace else image_stack.copy()
+    dtype = image_stack.dtype
+    is_int = np.issubdtype(dtype, np.integer)
+    profiles = {}
+    for c in (range(image_stack.shape[3]) if channels is None else channels):
+        ch = image_stack[:, :, :, c]
+        lo, hi = float(ch.min()), float(ch.max())
+        prof = estimate_z_attenuation(ch, model=model, signal_percentile=signal_percentile,
+                                      bg_percentile=bg_percentile, max_gain=max_gain,
+                                      strength=strength)
+        for z in range(ch.shape[0]):
+            g = prof["gain"][z]
+            if g == 1.0:
+                continue
+            sl = ch[z].astype(np.float32)
+            sl = prof["bg"][z] + (sl - prof["bg"][z]) * g
+            np.clip(sl, lo, hi, out=sl)
+            out[z, :, :, c] = np.rint(sl).astype(dtype) if is_int else sl.astype(dtype)
+        profiles[c] = prof
+    return out, profiles
+
+
+def plot_z_attenuation(profiles, names=None, voxel_z=None, show=True):
+    """Diagnostic plot of :func:`correct_z_attenuation`: for every corrected
+    channel the measured signal per slice and the fitted depth trend (top),
+    and the gain applied to each slice (bottom)."""
+    import matplotlib.pyplot as plt
+    if not profiles:
+        return None
+    keys = list(profiles)
+    fig, axes = plt.subplots(2, len(keys), figsize=(4.2 * len(keys), 5.2),
+                             sharex="col", squeeze=False)
+    for j, c in enumerate(keys):
+        p = profiles[c]
+        z = np.arange(len(p["signal"])) * (voxel_z or 1.0)
+        name = names[j] if names is not None and j < len(names) else f"channel {c}"
+        ax = axes[0, j]
+        ax.plot(z, p["signal"], "o", ms=3, color="#9aa0a6", label="measured")
+        ax.plot(z, p["fit"], "-", lw=2, color="#2a6fdb", label=f"{p['model']} fit")
+        ax.set_title(f"{name}: first/last = {p['ratio_first_last']:.2f}x", fontsize=10)
+        ax.set_ylabel("signal above background")
+        ax.legend(frameon=False, fontsize=8)
+        ax.grid(alpha=0.25)
+        ax = axes[1, j]
+        ax.plot(z, p["gain"], "-", lw=2, color="#2a6fdb")
+        ax.set_ylabel(f"gain (strength {p['strength']:g})")
+        ax.set_xlabel("Z [um]" if voxel_z else "Z slice")
+        ax.grid(alpha=0.25)
+    fig.tight_layout()
+    if show:
+        plt.show()
+    return fig
+
+
+def trim_flared_slices(labels, factor):
+    """Trim the Z slices where a nucleus flares out (v1.6.5).
+
+    Blurred nuclei, in the first/last slices especially, can spread far
+    wider in a few slices than in the rest of the nucleus. For every label,
+    starting from its slice of typical (median) cross-section and moving up
+    and down, a slice whose area is above ``factor`` x that median is cut
+    back to the previous slice's footprint grown by one pixel. ``factor``
+    0 = off.
+    """
+    if not factor or factor <= 0 or labels.ndim != 3 or labels.shape[0] < 3:
+        return labels
+    out = labels.copy()
+    n_trimmed = 0
+    for i, sl in enumerate(ndi.find_objects(labels), start=1):
+        if sl is None:
+            continue
+        m = labels[sl] == i
+        area = m.sum(axis=(1, 2))
+        zs = np.nonzero(area)[0]
+        if len(zs) < 3:
+            continue
+        ref = float(np.median(area[zs]))
+        core = int(zs[np.argmin(np.abs(area[zs] - ref))])
+        new = m.copy()
+        for step in (1, -1):
+            prev = new[core]
+            z = core + step
+            while 0 <= z < m.shape[0]:
+                if area[z] > factor * ref:
+                    new[z] = m[z] & ndi.binary_dilation(prev)
+                    n_trimmed += 1
+                if new[z].any():
+                    prev = new[z]
+                z += step
+        out[sl][m & ~new] = 0
+    if n_trimmed:
+        print(f"Flared slices trimmed (area > {factor:g}x the nucleus median): {n_trimmed}")
+    return out
+
+
 def resample_to_isotropic(image_stack, zoom_factors, meta=None):
     """
     Resample image stack to isotropic voxel spacing.
@@ -7916,6 +8332,883 @@ def _segment_nuclei_2d(mask, intensity, r_zxyz, nuclei_diameter, trig_cellpose=F
     return np.asarray(labels, dtype=np.int32)[np.newaxis]
 
 
+def _basin_saddles(basins, surface, n_basins):
+    """Saddle height between every pair of touching basins: the highest
+    voxel pair across their common boundary, each pair valued at the lower of
+    its two intensities (the pass point on the way from one peak to the
+    other). Returns ``{(i, j): height}`` with i < j."""
+    saddles = {}
+    for axis in range(basins.ndim):
+        a = [slice(None)] * basins.ndim
+        b = [slice(None)] * basins.ndim
+        a[axis], b[axis] = slice(1, None), slice(None, -1)
+        la, lb = basins[tuple(a)], basins[tuple(b)]
+        sel = (la > 0) & (lb > 0) & (la != lb)
+        if not sel.any():
+            continue
+        v = np.minimum(surface[tuple(a)][sel], surface[tuple(b)][sel])
+        code = (np.minimum(la[sel], lb[sel]).astype(np.int64) * (n_basins + 1)
+                + np.maximum(la[sel], lb[sel]))
+        order = np.argsort(code, kind="stable")
+        code, v = code[order], v[order]
+        uniq, start = np.unique(code, return_index=True)
+        for c, s in zip(uniq, np.maximum.reduceat(v, start)):
+            key = (int(c // (n_basins + 1)), int(c % (n_basins + 1)))
+            saddles[key] = max(saddles.get(key, -np.inf), float(s))
+    return saddles
+
+
+def split_nuclei_by_saddles(labels, intensity, spacing_zyx, nuclei_diameter, max_dip=0.8,
+                            smooth_fraction=0.1, seed_separation=0.5, min_piece_fraction=0.25,
+                            background=None):
+    """v1.6.7: split labels that hold several nuclei, where the image shows an
+    intensity valley between them.
+
+    Inside every label, the intensity (smoothed by ``smooth_fraction`` x
+    ``nuclei_diameter``) is flooded from its local peaks (at least
+    ``seed_separation`` x the diameter apart). Neighbouring basins are then
+    merged back, the highest saddle first, unless the saddle between them
+    is below ``max_dip`` x the dimmer of the two peaks (intensities above
+    ``background``), i.e. unless there is a real dark seam between two
+    bright nuclei. Basins smaller than ``min_piece_fraction`` x a nucleus
+    of ``nuclei_diameter`` are always merged back. This catches nuclei
+    stacked along Z (merged by the axial blur, often with a dim one under a
+    bright one), which the shape-based watershed cannot separate because
+    they overlap in every XY slice.
+
+    Parameters
+    ----------
+    labels : ndarray (Z, Y, X) int
+    intensity : ndarray (Z, Y, X)
+        Linear nuclei intensity (e.g. the 'Denoised image' channel, before
+        contrast / gamma).
+    spacing_zyx : tuple of float
+        Physical voxel size (um).
+    nuclei_diameter : float
+        um.
+    max_dip : float
+        0-1; 0 = off. Higher splits more (a shallower valley is enough).
+    background : float, optional
+        Intensity of the background; default the 25th percentile of
+        ``intensity``.
+
+    Returns
+    -------
+    (labels, n_new) : the split labels (ids of untouched labels kept, new
+    pieces numbered after the maximum) and the number of new labels.
+    """
+    from skimage.feature import peak_local_max
+    from skimage.segmentation import watershed
+
+    labels = np.asarray(labels)
+    if not max_dip or max_dip <= 0 or not labels.any():
+        return labels, 0
+    spacing = np.asarray(spacing_zyx, dtype=float)
+    if labels.ndim != 3 or labels.shape[0] == 1:
+        spacing = spacing[-2:]
+        labels3 = labels.reshape(labels.shape[-2:])
+        intensity3 = np.asarray(intensity).reshape(labels.shape[-2:])
+    else:
+        labels3, intensity3 = labels, np.asarray(intensity)
+    if background is None:
+        background = float(np.percentile(intensity3[::2, ::2] if intensity3.ndim == 2
+                                          else intensity3[::2, ::2, ::2], 25))
+    ndim = labels3.ndim
+    sigma = float(smooth_fraction) * float(nuclei_diameter) / spacing
+    nucleus_vox = (_sphere_volume_um3(nuclei_diameter) if ndim == 3
+                   else np.pi * (nuclei_diameter / 2.0) ** 2) / float(np.prod(spacing))
+    min_piece = float(min_piece_fraction) * nucleus_vox
+    rad = np.maximum(1, np.round(float(seed_separation) * nuclei_diameter / 2.0 / spacing)).astype(int)
+    grids = np.ogrid[tuple(slice(-r, r + 1) for r in rad)]
+    footprint = sum((g / r) ** 2 for g, r in zip(grids, rad)) <= 1.0
+    pad = np.ceil(3 * sigma).astype(int) + 1
+
+    out = labels3.copy()
+    next_id = int(out.max()) + 1
+    n_new = 0
+    for lab, sl in enumerate(ndi.find_objects(labels3), start=1):
+        if sl is None:
+            continue
+        sl = tuple(slice(max(0, s.start - p), min(n, s.stop + p))
+                   for s, p, n in zip(sl, pad, labels3.shape))
+        m = labels3[sl] == lab
+        if m.sum() < 2 * min_piece:
+            continue
+        surf = ndi.gaussian_filter(intensity3[sl].astype(np.float32), sigma) - background
+        peaks = peak_local_max(np.where(m, surf, surf.min()), footprint=footprint,
+                               labels=m.astype(np.int32), exclude_border=False)
+        if len(peaks) < 2:
+            continue
+        k = len(peaks)
+        markers = np.zeros(m.shape, np.int32)
+        markers[tuple(peaks.T)] = np.arange(1, k + 1)
+        basins = watershed(-surf, markers, mask=m)
+        peak_val = {i + 1: float(surf[tuple(p)]) for i, p in enumerate(peaks)}
+        size = dict(enumerate(np.bincount(basins.ravel(), minlength=k + 1)[1:].astype(float), 1))
+        saddles = _basin_saddles(basins, surf, k)
+        parent = list(range(k + 1))
+
+        def find(x):
+            while parent[x] != x:
+                parent[x] = parent[parent[x]]
+                x = parent[x]
+            return x
+
+        changed = True
+        while changed:
+            changed = False
+            between = {}
+            for (i, j), s in saddles.items():
+                ri, rj = find(i), find(j)
+                if ri != rj:
+                    key = (min(ri, rj), max(ri, rj))
+                    between[key] = max(between.get(key, -np.inf), s)
+            for (ri, rj), s in sorted(between.items(), key=lambda t: -t[1]):
+                if find(ri) != ri or find(rj) != rj:
+                    continue  # merged earlier in this pass
+                dip = s / max(min(peak_val[ri], peak_val[rj]), 1e-6)
+                if dip > max_dip or min(size[ri], size[rj]) < min_piece:
+                    parent[rj] = ri
+                    peak_val[ri] = max(peak_val[ri], peak_val[rj])
+                    size[ri] += size[rj]
+                    changed = True
+        roots = sorted({find(i) for i in range(1, k + 1)})
+        if len(roots) < 2:
+            continue
+        keep = max(roots, key=lambda r: size[r])  # the biggest piece keeps the id
+        lut = np.zeros(k + 1, np.int64)
+        for r in roots:
+            if r == keep:
+                continue
+            for i in range(1, k + 1):
+                if find(i) == r:
+                    lut[i] = next_id
+            next_id += 1
+            n_new += 1
+        new_ids = lut[basins]
+        region = out[sl]
+        sel = m & (new_ids > 0)
+        region[sel] = new_ids[sel]
+    return out.reshape(labels.shape), n_new
+
+
+def typical_nucleus_shape(labels, spacing_zyx):
+    """Median volume (um^3) and median elongation (Z extent / XY diameter of
+    the widest slice) of the labels: the image's own typical nucleus, robust
+    to the few merged or fragmented labels. Returns ``(volume, elongation,
+    per_label)`` with ``per_label`` = {id: (volume, z_extent, xy_diameter)}."""
+    spacing = np.asarray(spacing_zyx, dtype=float)
+    per_label = {}
+    for lab, sl in enumerate(ndi.find_objects(labels), start=1):
+        if sl is None:
+            continue
+        area = (labels[sl] == lab).sum(axis=(1, 2))
+        per_label[lab] = (float(area.sum() * spacing.prod()), float((area > 0).sum() * spacing[0]),
+                          float(2.0 * np.sqrt(area.max() * spacing[1] * spacing[2] / np.pi)))
+    if not per_label:
+        return 0.0, 1.0, per_label
+    vols = np.array([v[0] for v in per_label.values()])
+    elong = np.array([v[1] / max(v[2], 1e-6) for v in per_label.values()])
+    return float(np.median(vols)), float(np.median(elong)), per_label
+
+
+def split_tall_nuclei(labels, intensity, spacing_zyx, volume_factor=1.3, elongation_factor=1.3,
+                      max_pieces=4, min_piece_fraction=0.4):
+    """v1.6.7: size-aware split of nuclei stacked along Z with no visible seam.
+
+    The typical nucleus of the image is measured from its own labels
+    (`typical_nucleus_shape`: median volume and median Z/XY elongation). A
+    label both bigger than ``volume_factor`` x that volume AND more elongated
+    than ``elongation_factor`` x that elongation is taken as n nuclei on top
+    of each other (n = the smaller of the two ratios, rounded, 2 to
+    ``max_pieces``): a big but not taller nucleus - a large single one - is
+    left alone, and so are small and normal labels. The label is cut across
+    its long axis (Z scaled by the typical elongation, so a typical nucleus
+    is round) near each equal-volume position, at the minimum of the
+    intensity profile along the axis (the faint seam, if any). The cut is
+    dropped if a piece would be smaller than ``min_piece_fraction`` x the
+    typical volume.
+
+    On the AGG ground truth, the merges left after `split_nuclei_by_saddles`
+    were mostly such pairs, 6-8 um apart in Z with no intensity dip.
+
+    Returns ``(labels, n_new, typical_volume, typical_elongation)``.
+    """
+    labels = np.asarray(labels)
+    if not volume_factor or volume_factor <= 0 or labels.ndim != 3 or labels.shape[0] < 3 \
+            or not labels.any():
+        return labels, 0, 0.0, 1.0
+    spacing = np.asarray(spacing_zyx, dtype=float)
+    ref_vol, ref_el, per_label = typical_nucleus_shape(labels, spacing)
+    objs = ndi.find_objects(labels)
+    out = labels.copy()
+    next_id = int(out.max()) + 1
+    n_new = 0
+    for lab, (vol, z_ext, d_xy) in per_label.items():
+        el = z_ext / max(d_xy, 1e-6)
+        if vol < volume_factor * ref_vol or el < elongation_factor * ref_el:
+            continue
+        n = int(np.clip(round(min(vol / ref_vol, el / ref_el)), 2, max_pieces))
+        sl = objs[lab - 1]
+        m = labels[sl] == lab
+        coords = np.argwhere(m).astype(float) * spacing
+        coords[:, 0] /= ref_el
+        centred = coords - coords.mean(axis=0)
+        axis = np.linalg.svd(centred, full_matrices=False)[2][0]
+        t = centred @ axis
+        weights = np.asarray(intensity)[sl][m].astype(float)
+        n_bins = max(8, int(np.ptp(t) / 0.5))
+        mass, edges = np.histogram(t, bins=n_bins, weights=weights)
+        mass = ndi.gaussian_filter1d(mass, 1.0)
+        centres = 0.5 * (edges[1:] + edges[:-1])
+        half_window = 0.5 * np.ptp(t) / n
+        cuts = []
+        for q in np.quantile(t, np.arange(1, n) / n):
+            window = np.abs(centres - q) <= half_window
+            cuts.append(centres[window][np.argmin(mass[window])] if window.any() else q)
+        piece = np.searchsorted(np.sort(cuts), t)
+        if np.bincount(piece, minlength=n).min() * spacing.prod() < min_piece_fraction * ref_vol:
+            continue
+        pieces = np.zeros(m.shape, np.int64)
+        pieces[m] = piece
+        region = out[sl]
+        for k in range(1, n):
+            region[m & (pieces == k)] = next_id
+            next_id += 1
+            n_new += 1
+    return out, n_new, ref_vol, ref_el
+
+
+def refine_nuclei_boundaries(labels, intensity, spacing_zyx, edge_fraction=0.3, margin_um=1.0,
+                             background=None, peak_percentile=95, smooth_um=0.3):
+    """v1.6.7: redraw every nucleus edge at ``edge_fraction`` of its own peak.
+
+    A single threshold cuts dim nuclei too small and leaves bright ones too
+    big (and too long in Z, where the axial blur keeps them above the
+    threshold). Here each label keeps the voxels of its territory (the label
+    grown by ``margin_um`` into free space, never into a neighbour) brighter
+    than ``background + edge_fraction x (peak - background)``, with ``peak``
+    its own ``peak_percentile`` intensity: the same relative edge for every
+    nucleus, like a contrast adapted to each one. Only the part connected to
+    the original label is kept, holes are filled. A label whose new mask
+    would lose more than 80% of it is left as it was.
+
+    On the two ground truths, the manual edges sit at ~0.35-0.4 of each
+    nucleus' peak (dim and bright alike); ``edge_fraction`` 0.3 matched them
+    best (the cut falls just outside the last painted voxel).
+
+    Parameters
+    ----------
+    labels : ndarray (Z, Y, X) int
+    intensity : ndarray (Z, Y, X)
+        Linear nuclei intensity ('Denoised image' channel).
+    spacing_zyx : tuple of float
+        Physical voxel size (um).
+    edge_fraction : float
+        0-1; 0 = off.
+    margin_um : float
+        How far (um) an edge may move out of the original label.
+    background : float, optional
+        Default: the 25th percentile of ``intensity``.
+
+    Returns
+    -------
+    labels : ndarray, same shape and ids.
+    """
+    labels = np.asarray(labels)
+    if not edge_fraction or edge_fraction <= 0 or not labels.any():
+        return labels
+    spacing = np.asarray(spacing_zyx, dtype=float)
+    intensity = np.asarray(intensity, dtype=np.float32)
+    if labels.ndim == 3 and labels.shape[0] == 1:
+        return refine_nuclei_boundaries(labels[0], intensity.reshape(labels.shape[1:]), spacing[-2:],
+                                        edge_fraction, margin_um, background, peak_percentile,
+                                        smooth_um)[np.newaxis]
+    spacing = spacing[-labels.ndim:]
+    if background is None:
+        background = float(np.percentile(intensity[(slice(None, None, 2),) * labels.ndim], 25))
+    if smooth_um and smooth_um > 0:
+        intensity = ndi.gaussian_filter(intensity, float(smooth_um) / spacing)
+    territory = expand_labels_um(labels, float(margin_um), tuple(spacing)) if margin_um > 0 \
+        else labels.copy()
+    out = np.zeros_like(labels)
+    for lab, sl in enumerate(ndi.find_objects(territory), start=1):
+        if sl is None:
+            continue
+        core = labels[sl] == lab
+        if not core.any():
+            continue
+        terr = territory[sl] == lab
+        it = intensity[sl]
+        peak = float(np.percentile(it[core], peak_percentile))
+        new = core
+        if peak > background:
+            m = terr & (it >= background + float(edge_fraction) * (peak - background))
+            comp, _ = ndi.label(m)
+            touching = np.unique(comp[core & m])
+            m = np.isin(comp, touching[touching > 0])
+            m = ndi.binary_fill_holes(m) & terr
+            if m.sum() >= 0.2 * core.sum():
+                new = m
+        out[sl][new] = lab
+    return out
+
+
+def rescue_missed_nuclei(labels, intensity, spacing_zyx, min_contrast=0.25, grow_fraction=0.35,
+                         background=None, min_volume_fraction=0.25, max_volume_fraction=2.0):
+    """v1.6.8: add back nuclei the threshold mask missed (small, dim ones).
+
+    The typical nucleus of the image is measured from its own labels
+    (`typical_nucleus_shape`). Nucleus-sized bright spots are found with a
+    difference of Gaussians at that scale (Z stretched by the typical
+    elongation); a spot farther than one typical radius from every label and
+    brighter than ``background + min_contrast x`` (the labels' median peak
+    above background) is grown to ``grow_fraction`` of its own peak - the
+    same relative edge as `refine_nuclei_boundaries` - connected to the spot
+    and outside every label. It is kept if its volume is ``min_volume_fraction``
+    - ``max_volume_fraction`` x the typical nucleus, it is at most twice as
+    elongated, and it does not run out of its search box (haze, not a nucleus).
+
+    Returns ``(labels, n_added)``.
+    """
+    labels = np.asarray(labels)
+    if not min_contrast or min_contrast <= 0 or labels.ndim != 3 or labels.shape[0] < 3 \
+            or not labels.any():
+        return labels, 0
+    spacing = np.asarray(spacing_zyx, dtype=float)
+    raw = np.asarray(intensity, dtype=np.float32)
+    if background is None:
+        background = float(np.percentile(raw[::2, ::2, ::2], 25))
+    ref_vol, ref_el, _ = typical_nucleus_shape(labels, spacing)
+    r_um = (3.0 * ref_vol / (4.0 * np.pi * ref_el)) ** (1.0 / 3.0)
+    semi_axes = np.array([r_um * ref_el, r_um, r_um])
+    sigma = semi_axes / np.sqrt(3.0) / spacing
+    dog = ndi.gaussian_filter(raw, sigma) - ndi.gaussian_filter(raw, 2.0 * sigma)
+    smooth = ndi.gaussian_filter(raw, 0.5 / spacing) - background
+    peaks = ndi.labeled_comprehension(smooth, labels, np.arange(1, int(labels.max()) + 1),
+                                      lambda v: np.percentile(v, 95), float, 0)
+    ref_peak = float(np.median(peaks))
+    size = np.maximum(1, np.round(semi_axes / spacing)).astype(int) | 1
+    maxima = (dog == ndi.maximum_filter(dog, size=size)) & (dog > 0)
+    maxima &= expand_labels_um(labels, r_um, tuple(spacing)) == 0
+    cand = np.argwhere(maxima)
+    contrast = smooth[tuple(cand.T)]
+    keep = contrast >= float(min_contrast) * ref_peak
+    cand, contrast = cand[keep], contrast[keep]
+    out = labels.copy()
+    next_id = int(out.max()) + 1
+    half = np.ceil(1.5 * semi_axes / spacing).astype(int)
+    shape = np.array(raw.shape)
+    n_added = 0
+    for i in np.argsort(contrast)[::-1]:
+        c = cand[i]
+        if out[tuple(c)]:
+            continue
+        lo, hi = np.maximum(c - half, 0), np.minimum(c + half + 1, shape)
+        sl = tuple(slice(a, b) for a, b in zip(lo, hi))
+        m = (smooth[sl] > grow_fraction * contrast[i]) & (out[sl] == 0)
+        comp, _ = ndi.label(m)
+        k = comp[tuple(c - lo)]
+        if k == 0:
+            continue
+        m = comp == k
+        vol = m.sum() * spacing.prod()
+        if not (min_volume_fraction * ref_vol <= vol <= max_volume_fraction * ref_vol):
+            continue
+        area = m.sum(axis=(1, 2))
+        elong = (area > 0).sum() * spacing[0] / (2.0 * np.sqrt(area.max() * spacing[1] * spacing[2] / np.pi))
+        if elong > 2.0 * ref_el:
+            continue
+        touches = [(m[0].any() and lo[0] > 0) or (m[-1].any() and hi[0] < shape[0]),
+                   m[:, 0].any() and lo[1] > 0, m[:, -1].any() and hi[1] < shape[1],
+                   m[:, :, 0].any() and lo[2] > 0, m[:, :, -1].any() and hi[2] < shape[2]]
+        if any(touches):
+            continue
+        out[sl][m] = next_id
+        next_id += 1
+        n_added += 1
+    return out, n_added
+
+
+# v1.6.9: what the settings of validation_tuning/multi_v168/best_settings.json
+# were tuned for. On EB-019 (0.33 um pixels) and AGG (0.21 um), both at
+# scale_factor 0.5, a nucleus of 8 um spanned 12 and 19 voxels: the voxel-based
+# settings (sigma, gradient smoothing, minimum piece size...) are validated in
+# that range. The um settings below were tuned for an 8 um nucleus.
+AUTO_REFERENCE = {
+    "nuclei_diameter": 8.0,
+    "voxels_per_diameter": (12.0, 19.0),
+    "um_settings": {"z_bg_radius_um": 10.0, "nuclei_edge_margin_um": 1.0},
+}
+
+
+def _profile_extent(profile, centre, level, rise):
+    """Number of steps (half-step precision) around ``centre`` over which
+    ``profile`` stays >= ``level``; None if a neighbour (a rise of more than
+    ``rise`` above the running minimum) or the image border comes first."""
+    total = 0.0
+    for step in (-1, 1):
+        i, run_min, n = centre, profile[centre], 0.0
+        while True:
+            if not 0 <= i + step < len(profile):
+                return None
+            v = profile[i + step]
+            if v < level:
+                total += n + 0.5
+                break
+            if v > run_min + rise:
+                return None
+            run_min = min(run_min, v)
+            i += step
+            n += 1
+    return total
+
+
+def measure_nuclei_in_image(nuclei_zyx, voxel_size_zyx, contrast=None, edge_level=0.3,
+                            work_um=0.5, min_peak=0.15, max_candidates=600, verbose=True):
+    """v1.6.9: typical nucleus of an image, measured from the image alone.
+
+    ``nuclei_zyx`` is the NUCLEI channel on its original grid (any range); it
+    is normalized to 0-255 like Cell 9 and, with ``contrast`` =
+    ``(Cont_min, Cont_max, Gamma)``, given the contrast and gamma of the
+    stain table (Cell 8), so the measure sees what the segmentation sees.
+
+    Nucleus centres are the maxima of a scale-normalized Laplacian of
+    Gaussian (in XY, 2.8-17 um diameters, on a ~``work_um`` grid). Through
+    each centre the intensity profiles along X, Y and Z give the nucleus
+    extent at ``edge_level`` x its own peak above background; only clean
+    profiles count (the intensity falls below that level before rising
+    towards a neighbour or reaching the border), so touching nuclei do not
+    shorten it. ``edge_level`` 0.3 calibrated: on the EB-019 and AGG ground
+    truths the equivalent diameter (d_xy^2 d_z)^(1/3) came out 8.1 and 7.7 um,
+    where the tuner found ``nuclei_diameter`` 8 best on both.
+
+    Returns a dict: ``n_measured``, ``n_candidates``, ``d_xy_um``, ``d_z_um``,
+    ``elongation`` (Z / XY), ``eq_diameter_um`` and its interquartile range,
+    ``background``, ``noise``, ``snr`` (median peak / noise),
+    ``haze`` (spread of the per-slice background, as a fraction of the
+    median peak).
+    """
+    spacing = np.asarray(voxel_size_zyx, dtype=float)
+    img = np.asarray(nuclei_zyx, dtype=np.float32)
+    if img.ndim != 3 or img.shape[0] < 3:
+        raise ValueError("measure_nuclei_in_image needs a 3D (Z, Y, X) stack.")
+    lo, hi = float(img.min()), float(img.max())
+    img = (img - lo) / (hi - lo + 1e-8) * 255.0
+    if contrast is not None:
+        cmin, cmax, gamma = contrast
+        img = napari_contrast_gamma_uint8(img, (float(cmin), float(cmax)), float(gamma)) \
+            .astype(np.float32)
+    f = max(1, int(round(work_um / spacing[1])))
+    if f > 1:
+        img = ndi.zoom(img, (1, 1.0 / f, 1.0 / f), order=1)
+        spacing = spacing * [1, f, f]
+    sm = ndi.gaussian_filter(img, 0.5 / spacing)
+    sample = sm[::2, ::2, ::2]
+    bg = float(np.percentile(sample, 25))
+    noise = 1.4826 * float(np.median(np.abs(img[::2, ::2, ::2] - np.median(img[::2, ::2, ::2]))))
+    sig = sm - bg
+    best_r = best_s = None
+    for s in np.geomspace(1.0, 6.0, 9):  # LoG sigma, um (disk diameter ~2.8 sigma)
+        sg = (0, s / spacing[1], s / spacing[2])
+        r = -(s ** 2) * (ndi.gaussian_filter(sm, sg, order=(0, 2, 0))
+                         + ndi.gaussian_filter(sm, sg, order=(0, 0, 2)))
+        if best_r is None:
+            best_r, best_s = r, np.full(r.shape, s, np.float32)
+        else:
+            better = r > best_r
+            best_r = np.where(better, r, best_r)
+            best_s = np.where(better, s, best_s)
+    size = np.maximum(3, np.round(4.0 / spacing).astype(int) | 1)
+    maxima = (best_r == ndi.maximum_filter(best_r, size=size)) & (best_r > 0)
+    pts = np.argwhere(maxima)
+    peak = sig[tuple(pts.T)]
+    keep = peak > min_peak * float(np.percentile(sig, 99.5))
+    pts, peak = pts[keep], peak[keep]
+    order = np.argsort(best_r[tuple(pts.T)])[::-1][:max_candidates]
+    rows = []
+    clean = np.zeros(len(order), dtype=bool)
+    for n, i in enumerate(order):
+        z, y, x = pts[i]
+        p = float(peak[i])
+        level, rise = edge_level * p, 0.1 * p
+        ex = _profile_extent(sig[z, y, :], x, level, rise)
+        ey = _profile_extent(sig[z, :, x], y, level, rise)
+        ez = _profile_extent(sig[:, y, x], z, level, rise)
+        if ex is None or ey is None or ez is None:
+            continue
+        clean[n] = True
+        rows.append((0.5 * (ex * spacing[2] + ey * spacing[1]), ez * spacing[0], p))
+    slice_bg = np.percentile(sm[:, ::2, ::2].reshape(sm.shape[0], -1), 25, axis=1)
+    out = {"n_measured": len(rows), "n_candidates": int(len(order)), "background": bg,
+           "noise": noise, "edge_level": edge_level,
+           # v1.7.0: for measure_image_features (um, original grid)
+           "centres_um": pts[order] * spacing if len(order) else np.zeros((0, 3)),
+           "clean_mask": clean}
+    if rows:
+        a = np.array(rows)
+        eq = (a[:, 0] ** 2 * a[:, 1]) ** (1.0 / 3.0)
+        med_peak = float(np.median(a[:, 2]))
+        out.update(d_xy_um=float(np.median(a[:, 0])), d_z_um=float(np.median(a[:, 1])),
+                   elongation=float(np.median(a[:, 1] / a[:, 0])),
+                   eq_diameter_um=float(np.median(eq)),
+                   eq_diameter_iqr_um=tuple(float(v) for v in np.percentile(eq, [25, 75])),
+                   snr=med_peak / max(noise, 1e-6),
+                   haze=float(np.ptp(np.percentile(slice_bg, [10, 90])) / max(med_peak, 1e-6)))
+    if verbose:
+        if rows:
+            print(f"Measured {out['n_measured']} nuclei (of {out['n_candidates']} candidates): "
+                  f"diameter {out['d_xy_um']:.1f} um in XY, {out['d_z_um']:.1f} um in Z "
+                  f"(elongation {out['elongation']:.2f}); equivalent diameter "
+                  f"{out['eq_diameter_um']:.1f} um (IQR {out['eq_diameter_iqr_um'][0]:.1f}-"
+                  f"{out['eq_diameter_iqr_um'][1]:.1f}); signal/noise {out['snr']:.0f}, "
+                  f"haze {out['haze']:.2f}")
+        else:
+            print(f"No nucleus with a clean profile among {out['n_candidates']} candidates.")
+    return out
+
+
+def _edge_profile_stats(profile, centre, bg, peak, rise, floor=0.05):
+    """v1.7.0: steepest-edge level and 80-20% edge width (in steps) of a
+    nucleus profile, on both sides of ``centre``.
+
+    Walks outwards until the profile drops below ``bg + floor x (peak - bg)``;
+    None for a side that meets a neighbour (a rise of more than ``rise`` above
+    the running minimum) or the border first. Returns a list of
+    ``(level, width)``, one per clean side: ``level`` = the intensity at the
+    steepest descent as a fraction of ``peak`` above ``bg``.
+    """
+    out = []
+    amp = peak - bg
+    if amp <= 0:
+        return out
+    stop = bg + floor * amp
+    for step in (-1, 1):
+        vals = [float(profile[centre])]
+        i, run_min, ok = centre, float(profile[centre]), False
+        while 0 <= i + step < len(profile):
+            v = float(profile[i + step])
+            if v > run_min + rise:
+                break
+            vals.append(v)
+            run_min = min(run_min, v)
+            i += step
+            if v < stop:
+                ok = True
+                break
+        if not ok or len(vals) < 3:
+            continue
+        a = (np.asarray(vals) - bg) / amp
+        drop = a[:-1] - a[1:]                  # descent between consecutive samples
+        k = int(np.argmax(drop))
+        level = 0.5 * (a[k] + a[k + 1])
+        # 80% and 20% crossings (linear interpolation), first time below
+        def cross(t):
+            j = int(np.argmax(a < t))
+            if j == 0:
+                return None
+            return j - 1 + (a[j - 1] - t) / max(a[j - 1] - a[j], 1e-9)
+        c80, c20 = cross(0.8), cross(0.2)
+        width = (c20 - c80) if c80 is not None and c20 is not None else None
+        out.append((float(level), width))
+    return out
+
+
+def measure_image_features(nuclei_zyx, voxel_size_zyx, contrast=None, measurement=None,
+                           smooth_um=0.3, work_um=0.5, min_peak=0.15, max_candidates=600,
+                           verbose=True):
+    """v1.7.0: image properties that the threshold / edge / split settings may
+    depend on, measured from the image alone (no ground truth).
+
+    The nucleus centres are those of `measure_nuclei_in_image` (found on the
+    image with its contrast / gamma); everything else is measured on the
+    LINEAR intensity, normalized 0-255 and smoothed by ``smooth_um``, with the
+    25th-percentile background: the same intensity and background
+    `refine_nuclei_boundaries` (``nuclei_edge_fraction``) works on.
+
+    Returns a dict:
+
+    - ``edge_level_xy`` / ``edge_level_z``: median intensity at the steepest
+      descent of the nucleus profiles, as a fraction of the nucleus peak above
+      background (sharp, well separated edges ~0.5; blurred / hazy edges, or
+      nuclei smaller than the blur, lower).
+    - ``edge_width_xy_um`` / ``edge_width_z_um``: median 80%-20% edge width.
+    - ``nn_ratio``: median distance between neighbouring nucleus centres /
+      the equivalent diameter (crowding; < 1.2 = mostly touching).
+    - ``touching_fraction``: candidates with a neighbour closer than one
+      diameter; ``clean_fraction``: candidates with clean profiles.
+    - ``peak_spread``: 90th / 10th percentile of the nucleus peaks (dim nuclei
+      among bright ones).
+    - ``saturated_fraction``: voxels at the maximum value of the raw stack.
+    - ``bg_unevenness``: spread (90th - 10th percentile) of the local
+      background over XY tiles of ~4 diameters, / the median peak.
+    - ``mask_fraction``: voxels above background + 0.25 x median peak
+      (how much of the volume is nuclei-like).
+    """
+    from scipy.spatial import cKDTree
+    raw = np.asarray(nuclei_zyx)
+    spacing = np.asarray(voxel_size_zyx, dtype=float)
+    if measurement is None:
+        measurement = measure_nuclei_in_image(raw, spacing, contrast=contrast, work_um=work_um,
+                                              min_peak=min_peak, max_candidates=max_candidates,
+                                              verbose=False)
+    centres = measurement.get("centres_um")
+    d_eq = measurement.get("eq_diameter_um")
+    hi = float(raw.max())
+    out = {"saturated_fraction": float(np.mean(raw[::2, ::2, ::2] >= hi)) if hi > 0 else 0.0}
+    if centres is None or len(centres) < 5 or d_eq is None:
+        if verbose:
+            print("Too few nuclei found to measure the image features.")
+        return out
+    lin = raw.astype(np.float32)
+    lo = float(lin.min())
+    lin = (lin - lo) / (hi - lo + 1e-8) * 255.0
+    lin = ndi.gaussian_filter(lin, float(smooth_um) / spacing)
+    bg = float(np.percentile(lin[::2, ::2, ::2], 25))
+
+    pts = np.asarray(centres, dtype=float)
+    idx = np.clip(np.round(pts / spacing).astype(int), 0, np.array(lin.shape) - 1)
+    # snap to the local maximum (the centres come from a coarser grid)
+    r = np.maximum(1, np.round(np.array([0.5, 0.6, 0.6]) / spacing).astype(int))
+    peaks = []
+    for n, (z, y, x) in enumerate(idx):
+        sl = tuple(slice(max(0, c - k), c + k + 1) for c, k in zip((z, y, x), r))
+        sub = lin[sl]
+        off = np.unravel_index(int(np.argmax(sub)), sub.shape)
+        idx[n] = [s.start + o for s, o in zip(sl, off)]
+        peaks.append(float(sub.max()))
+    peaks = np.asarray(peaks)
+
+    # crowding, on all candidates
+    tree = cKDTree(pts)
+    dist, _ = tree.query(pts, k=2)
+    nn = dist[:, 1]
+    out.update(nn_ratio=float(np.median(nn) / d_eq),
+               touching_fraction=float(np.mean(nn < d_eq)),
+               clean_fraction=measurement["n_measured"] / max(1, measurement["n_candidates"]),
+               peak_spread=float(np.percentile(peaks - bg, 90) /
+                                 max(np.percentile(peaks - bg, 10), 1e-6)))
+
+    # edges, on the clean nuclei only (measured profiles)
+    clean = measurement.get("clean_mask")
+    levels = {"xy": [], "z": []}
+    widths = {"xy": [], "z": []}
+    for n in (np.flatnonzero(clean) if clean is not None else range(len(idx))):
+        z, y, x = idx[n]
+        p = peaks[n]
+        rise = 0.1 * (p - bg)
+        for axis, prof, c, step in (("xy", lin[z, y, :], x, spacing[2]),
+                                    ("xy", lin[z, :, x], y, spacing[1]),
+                                    ("z", lin[:, y, x], z, spacing[0])):
+            for level, width in _edge_profile_stats(prof, c, bg, p, rise):
+                levels[axis].append(level)
+                if width is not None:
+                    widths[axis].append(width * step)
+    for axis in ("xy", "z"):
+        if levels[axis]:
+            out[f"edge_level_{axis}"] = float(np.median(levels[axis]))
+        if widths[axis]:
+            out[f"edge_width_{axis}_um"] = float(np.median(widths[axis]))
+    med_peak = float(np.median(peaks)) - bg
+
+    # background over XY tiles (~4 diameters), 10th percentile through Z
+    tile = np.maximum(8, np.round(4 * d_eq / spacing[1:]).astype(int))
+    tiles = []
+    for y0 in range(0, lin.shape[1] - tile[0] // 2, tile[0]):
+        for x0 in range(0, lin.shape[2] - tile[1] // 2, tile[1]):
+            tiles.append(float(np.percentile(lin[:, y0:y0 + tile[0]:2, x0:x0 + tile[1]:2], 10)))
+    if len(tiles) >= 2:
+        out["bg_unevenness"] = float(np.ptp(np.percentile(tiles, [10, 90])) / max(med_peak, 1e-6))
+    out["mask_fraction"] = float(np.mean(lin[::2, ::2, ::2] > bg + 0.25 * med_peak))
+    out["n_edges"] = len(levels["xy"])
+    if verbose:
+        def f(k, fmt=".2f"):
+            return format(out[k], fmt) if k in out else "n/a"
+        print(f"Image features: edge level {f('edge_level_xy')} XY / {f('edge_level_z')} Z of the "
+              f"peak, edge width {f('edge_width_xy_um', '.1f')} / {f('edge_width_z_um', '.1f')} um; "
+              f"neighbours at {f('nn_ratio')} diameters ({f('touching_fraction')} touching); "
+              f"peak spread {f('peak_spread', '.1f')}x; saturated {f('saturated_fraction', '.4f')}; "
+              f"background unevenness {f('bg_unevenness')}; nuclei-like volume "
+              f"{f('mask_fraction')}")
+    return out
+
+
+def adapt_nuclei_settings(measurement, settings, voxel_size_zyx, reference=None,
+                          min_measured=15, adapt_scale=True, diameter_tolerance=0.1,
+                          verbose=True):
+    """v1.6.9: adapt the NUCLEI settings to the nuclei measured in the image.
+
+    ``settings``: dict with at least ``nuclei_diameter`` and ``scale_factor``
+    (and optionally the um settings of ``reference['um_settings']``), e.g.
+    the tuned settings. ``measurement``: from `measure_nuclei_in_image`.
+    ``reference`` (default ``AUTO_REFERENCE``): what those settings were
+    tuned for.
+
+    - ``nuclei_diameter`` = the measured equivalent diameter, if it is more
+      than ``diameter_tolerance`` (10%) off the current one. Smaller changes
+      are within the precision of the measure: on the three ground truths
+      (EB-019, AGG, GelMA) moving 8.0 um by 0.2-0.3 um only added noise.
+    - The um settings tuned for the reference nucleus (haze radius, edge
+      margin) are scaled with the new diameter (only when it changed).
+    - ``scale_factor`` (``adapt_scale``): changed only if a nucleus would
+      span fewer / more voxels than on the tuned images, to the nearest end
+      of that range (at most 1.0: the image is never upsampled).
+    - ``z_elongation`` is not changed: the tuned value did not follow the
+      measured elongation (AGG nuclei measure ~1.5, 2.5 scored best).
+
+    Nothing changes if fewer than ``min_measured`` nuclei were measured.
+    Returns ``(adapted settings, changes)``, ``changes`` = list of
+    ``(name, old, new, reason)``.
+    """
+    ref = reference or AUTO_REFERENCE
+    out = dict(settings)
+    changes = []
+    n = measurement.get("n_measured", 0)
+    if n < min_measured or "eq_diameter_um" not in measurement:
+        if verbose:
+            print(f"Only {n} nuclei measured (< {min_measured}): settings left as they are.")
+        return out, changes
+    measured = round(float(measurement["eq_diameter_um"]), 1)
+    current = float(settings["nuclei_diameter"])
+    if abs(measured - current) > diameter_tolerance * current:
+        changes.append(("nuclei_diameter", settings["nuclei_diameter"], measured,
+                        f"measured equivalent diameter (> {diameter_tolerance:.0%} off)"))
+        out["nuclei_diameter"] = d = measured
+    else:
+        d = current
+    k = d / float(ref["nuclei_diameter"])
+    for name, value in ref["um_settings"].items():
+        if d != current and name in settings and settings[name] and settings[name] > 0:
+            new = round(value * k, 1)
+            if abs(new - float(settings[name])) >= 0.05:
+                changes.append((name, settings[name], new,
+                                f"{value:g} um for a {ref['nuclei_diameter']:g} um nucleus"))
+                out[name] = new
+    if adapt_scale:
+        r_xy = float(voxel_size_zyx[-1])
+        s = float(settings["scale_factor"])
+        lo_vox, hi_vox = ref["voxels_per_diameter"]
+        vox = d * s / r_xy
+        if vox < lo_vox or vox > hi_vox:
+            # to a multiple of 0.05 inside the range
+            steps = (lo_vox if vox < lo_vox else hi_vox) * r_xy / d / 0.05
+            steps = np.ceil(steps - 1e-9) if vox < lo_vox else np.floor(steps + 1e-9)
+            new_s = float(round(min(1.0, max(0.05, float(steps) * 0.05)), 2))
+            if abs(new_s - s) > 1e-9:
+                changes.append(("scale_factor", s, new_s,
+                                f"a nucleus spans {vox:.1f} voxels at {s:g}, "
+                                f"{d * new_s / r_xy:.1f} at {new_s:g} "
+                                f"(tuned range {lo_vox:g}-{hi_vox:g})"))
+                out["scale_factor"] = new_s
+    if verbose:
+        if changes:
+            print("Settings adapted to the image:")
+            for name, old, new, why in changes:
+                print(f"  {name}: {old!r} -> {new!r}  ({why})")
+        else:
+            print("Settings already match the image: nothing changed.")
+        el = measurement.get("elongation")
+        if el is not None and "z_elongation" in settings:
+            print(f"  (z_elongation kept at {settings['z_elongation']:g}; measured nucleus "
+                  f"elongation {el:.2f})")
+    return out, changes
+
+
+def adapt_settings_to_image(original_image, stain_complete_df, voxel_size_zyx, settings,
+                            condition="NUCLEI", adapt_scale=True, verbose=True,
+                            with_features=False):
+    """v1.6.9: `measure_nuclei_in_image` + `adapt_nuclei_settings` for the
+    notebook (Cell 8b) and the batch mode.
+
+    ``original_image``: (Z, Y, X, C) 'Original image' of the stack (Cell 7),
+    channels in the order of ``stain_complete_df``; the ``condition``
+    channel is measured with its ``Cont_min`` / ``Cont_max`` / ``Gamma``
+    (Cell 8, chosen by the user or automatic). ``settings``: dict with
+    ``nuclei_diameter``, ``scale_factor`` and the um settings to scale.
+    Returns ``(adapted settings, changes)``; v1.7.0, ``with_features``:
+    ``(adapted settings, changes, features)`` with the image features of
+    `measure_image_features` and the nucleus measurement (for the record;
+    they do not change any setting).
+    """
+    c = stain_complete_df.index.get_loc(condition)
+    row = stain_complete_df.loc[condition]
+    contrast = (float(row["Cont_min"]), float(row["Cont_max"]), float(row["Gamma"]))
+    channel = np.asarray(original_image)[..., c]
+    measurement = measure_nuclei_in_image(channel, voxel_size_zyx, contrast=contrast,
+                                          verbose=verbose)
+    out, changes = adapt_nuclei_settings(measurement, settings, voxel_size_zyx,
+                                         adapt_scale=adapt_scale, verbose=verbose)
+    if not with_features:
+        return out, changes
+    features = measure_image_features(channel, voxel_size_zyx, measurement=measurement,
+                                      verbose=verbose)
+    features.update({k: v for k, v in measurement.items()
+                     if k not in ("centres_um", "clean_mask")})
+    return out, changes, features
+
+
+def postprocess_nuclei_labels(labels, intensity, spacing_zyx, nuclei_diameter,
+                              flare_trim_factor=0.0, saddle_dip=0.0, tall_volume_factor=1.15,
+                              tall_elongation_factor=0.0, rescue_contrast=0.0,
+                              rescue_grow_fraction=0.35, edge_fraction=0.0, edge_margin_um=1.0,
+                              expand_um=0.0, verbose=True):
+    """v1.6.8: the steps after the watershed and size refinement, in order.
+
+    flare trim -> saddle split -> tall split -> rescue of missed nuclei ->
+    per-nucleus edges -> label growth. Each step is off at 0 (see
+    `segment_nuclei` for the parameters). ``intensity`` is the linear NUCLEI
+    channel ('Denoised image', before contrast / gamma), ``spacing_zyx`` the
+    physical voxel size. One function so the tuner can re-run only these
+    steps on cached watershed labels.
+    """
+    from skimage.segmentation import relabel_sequential
+    say = print if verbose else (lambda *a, **k: None)
+    im_out = labels
+    if flare_trim_factor and flare_trim_factor > 0:
+        im_out = trim_flared_slices(im_out, float(flare_trim_factor))
+    tall_on = bool(tall_volume_factor and tall_volume_factor > 0 and
+                   tall_elongation_factor and tall_elongation_factor > 0)
+    if (saddle_dip and saddle_dip > 0) or (edge_fraction and edge_fraction > 0) or tall_on or \
+            (rescue_contrast and rescue_contrast > 0):
+        linear = np.asarray(intensity)
+        background = float(np.percentile(linear[::2, ::2, ::2], 25))
+        if saddle_dip and saddle_dip > 0:
+            im_out, n_new = split_nuclei_by_saddles(
+                im_out, linear, spacing_zyx, nuclei_diameter, max_dip=float(saddle_dip),
+                background=background)
+            if n_new:
+                im_out, _, _ = relabel_sequential(im_out)
+            say(f"Split at intensity valleys (saddle < {saddle_dip:g} x the dimmer "
+                f"peak): +{n_new} -> {int(im_out.max())} nuclei")
+        if tall_on:
+            im_out, n_new, ref_vol, ref_el = split_tall_nuclei(
+                im_out, ndi.gaussian_filter(linear.astype(np.float32), 0.5 / np.asarray(spacing_zyx)),
+                spacing_zyx, volume_factor=float(tall_volume_factor),
+                elongation_factor=float(tall_elongation_factor))
+            if n_new:
+                im_out, _, _ = relabel_sequential(im_out)
+            say(f"Typical nucleus of this image: {ref_vol:.0f} um^3, Z/XY elongation "
+                f"{ref_el:.2f}. Labels > {tall_elongation_factor:g}x that elongation (and "
+                f"{tall_volume_factor:g}x that volume) split along Z: +{n_new} -> "
+                f"{int(im_out.max())} nuclei")
+        if rescue_contrast and rescue_contrast > 0:
+            im_out, n_new = rescue_missed_nuclei(
+                im_out, linear, spacing_zyx, min_contrast=float(rescue_contrast),
+                grow_fraction=float(rescue_grow_fraction), background=background)
+            say(f"Nuclei missed by the threshold added back (spots > {rescue_contrast:g} x the "
+                f"median nucleus contrast): +{n_new} -> {int(im_out.max())} nuclei")
+        if edge_fraction and edge_fraction > 0:
+            im_out = refine_nuclei_boundaries(
+                im_out, linear, spacing_zyx, edge_fraction=float(edge_fraction),
+                margin_um=float(edge_margin_um), background=background)
+            say(f"Nuclei edges redrawn at {edge_fraction:g} x each nucleus' own peak "
+                f"(within {edge_margin_um:g} um of the label).")
+    if expand_um and expand_um > 0:
+        im_out = expand_labels_um(im_out, float(expand_um), tuple(spacing_zyx))
+        say(f"Nuclei grown by {expand_um:g} um into free space.")
+    return im_out
+
+
 def segment_nuclei(
     im_final_stack,
     stain_df,
@@ -7936,6 +9229,16 @@ def segment_nuclei(
     split_gamma=1.0,
     split_gamma_step=0.0,
     min_piece_fraction=0.0,
+    z_elongation=1.0,
+    nuclei_expand_um=0.0,
+    nuclei_flare_trim_factor=0.0,
+    nuclei_saddle_dip=0.0,
+    nuclei_edge_fraction=0.0,
+    nuclei_edge_margin_um=1.0,
+    nuclei_tall_volume_factor=1.15,
+    nuclei_tall_elongation_factor=0.0,
+    nuclei_rescue_contrast=0.0,
+    nuclei_rescue_grow_fraction=0.35,
 ):
     """
     Segment nuclei from the image using watershed, StarDist, or Cellpose.
@@ -8023,6 +9326,55 @@ def segment_nuclei(
         island smaller than this x a nucleus of ``nuclei_diameter`` are merged
         into the closest big piece of the same island
         (`absorb_small_split_pieces`). Default 0 = off.
+    z_elongation : float
+        v1.6.4, 3D images. How many times taller (Z) than wide (XY) a nucleus
+        looks in the image - e.g. ~2.5-3 at 20x, where the axial blur
+        stretches every nucleus along Z. The nuclei segmentation then works
+        with a Z voxel size ``z_elongation`` times smaller, so a stretched
+        nucleus counts as one round nucleus of ``nuclei_diameter``: the
+        expected nucleus volume, the erosion radii and the split distances
+        match the real objects, and a single tall nucleus is no longer taken
+        for an assembly and split along Z. The labels stay on the same grid;
+        only the segmentation's notion of distance in Z changes. Default 1.0
+        = off (v1.6.3 behaviour).
+    nuclei_expand_um : float
+        v1.6.4. Grow every final nucleus label by this distance (um, physical
+        voxel size) into free space, without overlapping its neighbours - for
+        nuclei that come out narrower than they are (threshold too tight at
+        the edge). Default 0 = off.
+    nuclei_flare_trim_factor : float
+        v1.6.5, 3D images. Cut back the Z slices where a nucleus is wider
+        than this x its median cross-section (blur flaring, typically in the
+        first slices); see `trim_flared_slices`. Applied before
+        ``nuclei_expand_um``. Default 0 = off.
+    nuclei_saddle_dip : float
+        v1.6.7, 3D NUCLEI channel. Split a label where the intensity between
+        two of its peaks drops below this x the dimmer peak (e.g. two nuclei
+        stacked in Z); see `split_nuclei_by_saddles`. 0.8 matched the ground
+        truths best. Default 0 = off.
+    nuclei_edge_fraction : float
+        v1.6.7, 3D NUCLEI channel. Redraw every nucleus edge at this fraction
+        of its own peak intensity (within ``nuclei_edge_margin_um`` of the
+        label); see `refine_nuclei_boundaries`. 0.3 matched the ground truths
+        best. Default 0 = off.
+    nuclei_edge_margin_um : float
+        How far (um) ``nuclei_edge_fraction`` may move an edge outwards.
+    nuclei_tall_volume_factor, nuclei_tall_elongation_factor : float
+        v1.6.7, 3D. Size-aware split (`split_tall_nuclei`): a label more
+        elongated in Z than ``nuclei_tall_elongation_factor`` x the image's
+        typical elongation (and bigger than ``nuclei_tall_volume_factor`` x
+        its typical volume) is cut into stacked nuclei; normal labels, and big
+        ones that are not taller, are left alone. Runs after the saddle split,
+        before the edge refinement. v1.6.8: the elongation is the switch
+        (default 0 = off; 1.2 matched the ground truths); the volume factor
+        hardly matters (1.15-1.6 gave the same labels) and defaults to 1.15.
+        Either at 0 = off (a v1.6.7 setting with the volume factor 0 stays off).
+    nuclei_rescue_contrast, nuclei_rescue_grow_fraction : float
+        v1.6.8, 3D. Add back nuclei the threshold missed
+        (`rescue_missed_nuclei`): nucleus-sized bright spots away from every
+        label, brighter than ``nuclei_rescue_contrast`` x the median nucleus
+        peak (above background), each grown to ``nuclei_rescue_grow_fraction``
+        of its own peak. Runs before the edge refinement. Default 0 = off.
 
     Returns
     -------
@@ -8030,6 +9382,15 @@ def segment_nuclei(
         Dict with key 'Nuclei' mapping to the integer label array (Z, Y, X).
     """
     from skimage.measure import label as skimage_label
+
+    # Physical spacing (for the label expansion) vs the spacing seen by the
+    # segmentation (Z shrunk by z_elongation, v1.6.4).
+    physical_zyx = (r_zxyz[2], r_zxyz[1], r_zxyz[0])
+    z_elongation = float(z_elongation or 1.0)
+    if abs(z_elongation - 1.0) > 1e-6 and im_final_stack['Threshold image'].shape[0] > 1:
+        r_zxyz = (r_zxyz[0], r_zxyz[1], r_zxyz[2] / z_elongation)
+        print(f"Z elongation {z_elongation:g}: nuclei segmented with a Z voxel size of "
+              f"{r_zxyz[2]:.3f} um instead of {physical_zyx[0]:.3f} um")
     from skimage import morphology
     from skimage.segmentation import relabel_sequential
 
@@ -8242,6 +9603,14 @@ def segment_nuclei(
 
         im_out = _refine(im_out, split_intensity, split_intensity_raw, gamma_levels)
         del split_intensity, split_intensity_raw
+        im_out = postprocess_nuclei_labels(
+            im_out, im_final_stack['Denoised image'][:, :, :, c], physical_zyx, nuclei_diameter,
+            flare_trim_factor=nuclei_flare_trim_factor, saddle_dip=nuclei_saddle_dip,
+            tall_volume_factor=nuclei_tall_volume_factor,
+            tall_elongation_factor=nuclei_tall_elongation_factor,
+            rescue_contrast=nuclei_rescue_contrast, rescue_grow_fraction=nuclei_rescue_grow_fraction,
+            edge_fraction=nuclei_edge_fraction, edge_margin_um=nuclei_edge_margin_um,
+            expand_um=nuclei_expand_um)
         im_segmentation_stack['Nuclei'] = im_out
 
     return im_segmentation_stack
@@ -9868,6 +11237,29 @@ def edit_stain_dict(channels, name_setup=None, use_saved=True):
     return editor
 
 
+# v1.6.8: NUCLEI settings of the nuclei notebook v1.6.4-v1.6.8 for the batch
+# mode (`run_batch_folder(nuclei_options=...)`), at their "off" values: the
+# depth correction (Cell 10), the slice-wise haze removal (Cell 12), the
+# threshold weights (Cell 15) and the segment_nuclei options (Cell 17).
+BATCH_NUCLEI_OPTIONS = {
+    "z_atten_model": "off", "z_atten_strength": 1.0, "z_atten_conditions": ["NUCLEI"],
+    "z_bg_radius_um": 0.0, "z_bg_percentile": 25.0,
+    "global_threshold_weight": 0.15, "sauvola_weight": 0.60,
+    "z_elongation": 1.0, "nuclei_expand_um": 0.0, "nuclei_flare_trim_factor": 0.0,
+    "nuclei_saddle_dip": 0.0, "nuclei_edge_fraction": 0.0, "nuclei_edge_margin_um": 1.0,
+    "nuclei_tall_volume_factor": 1.15, "nuclei_tall_elongation_factor": 0.0,
+    "nuclei_rescue_contrast": 0.0, "nuclei_rescue_grow_fraction": 0.35,
+    "auto_adapt": False,  # v1.6.9: adapt the settings to each image (adapt_settings_to_image)
+    # v1.6.4: "calibrated" = NUCLEI contrast of every image from its own
+    # histogram (`calibrated_contrast`), whatever the setup / automatic_contrast
+    "nuclei_contrast": None,
+}
+_BATCH_SEGMENT_NUCLEI_KEYS = (
+    "z_elongation", "nuclei_expand_um", "nuclei_flare_trim_factor", "nuclei_saddle_dip",
+    "nuclei_edge_fraction", "nuclei_edge_margin_um", "nuclei_tall_volume_factor",
+    "nuclei_tall_elongation_factor", "nuclei_rescue_contrast", "nuclei_rescue_grow_fraction")
+
+
 def _process_single_image_batch(
     input_file,
     output_dir,
@@ -9910,12 +11302,19 @@ def _process_single_image_batch(
     split_gamma_step=0.0,
     min_piece_fraction=0.0,
     pcm_thickness_factor=0.05,
+    nuclei_options=None,
 ):
     """Run the notebook pipeline (Cells 5-35) on one file, without viewers,
     plots or PNG subfolders, writing every output file into *output_dir*
     (this image's own subfolder of the batch output folder).
     ``split_gamma``, ``split_gamma_step`` and ``min_piece_fraction`` are the
-    nuclei notebook v1.6.3 splitting settings (defaults: off, as in v1.6.2)."""
+    nuclei notebook v1.6.3 splitting settings (defaults: off, as in v1.6.2).
+    ``nuclei_options``: the v1.6.4-v1.6.8 NUCLEI settings, see
+    `BATCH_NUCLEI_OPTIONS` (missing keys = off)."""
+    opts = dict(BATCH_NUCLEI_OPTIONS, **(nuclei_options or {}))
+    unknown = set(opts) - set(BATCH_NUCLEI_OPTIONS)
+    if unknown:
+        raise ValueError(f"Unknown nuclei_options: {sorted(unknown)}")
     roi = list(roi_coords)
     if interactive_roi:
         roi = select_roi_interactively(input_file, roi, napari_module=napari_module,
@@ -9954,13 +11353,49 @@ def _process_single_image_batch(
         r_xyz=(r_X, r_Y, r_Z),
         progress=progress,
     )
+    if opts["nuclei_contrast"] == "calibrated" and "NUCLEI" in stain_complete_df.index:  # v1.6.4
+        nuc_contrast = calibrated_contrast(
+            im_final_stack['Original image'][..., stain_complete_df.index.get_loc("NUCLEI")])
+        for col, value in nuc_contrast.items():
+            stain_complete_df.loc["NUCLEI", col] = value
+            original_stain_complete_df.loc["NUCLEI", col] = value
+    elif opts["nuclei_contrast"] not in (None, "calibrated"):
+        raise ValueError("nuclei_options['nuclei_contrast'] must be None or 'calibrated'")
+    adapted_note = "off"
+    if opts["auto_adapt"] and not is_2d and "NUCLEI" in stain_complete_df.index:  # v1.6.9
+        adapted, changes = adapt_settings_to_image(
+            im_final_stack['Original image'], stain_complete_df, (r_Z, r_Y, r_X),
+            {"nuclei_diameter": nuclei_diameter, "scale_factor": scale_factor,
+             "z_bg_radius_um": opts["z_bg_radius_um"],
+             "nuclei_edge_margin_um": opts["nuclei_edge_margin_um"]})
+        nuclei_diameter = adapted["nuclei_diameter"]
+        opts["z_bg_radius_um"] = adapted["z_bg_radius_um"]
+        opts["nuclei_edge_margin_um"] = adapted["nuclei_edge_margin_um"]
+        if adapted["scale_factor"] != scale_factor:
+            scale_factor = adapted["scale_factor"]
+            zooms = [z * scale_factor for z in zoom_factors]
+        cyto_factor = int(np.round(cell_diameter / nuclei_diameter))
+        adapted_note = "; ".join(f"{n} {o} -> {v}" for n, o, v, _ in changes) or "no change"
 
     # Cells 10-16
+    if opts["z_atten_model"] != "off" and im_final_stack['Original image'].shape[0] > 2:  # v1.6.6
+        conds = list(stain_complete_df.index) if opts["z_atten_conditions"] == "all" else \
+            [c for c in opts["z_atten_conditions"] if c in stain_complete_df.index]
+        im_final_stack['Original image'], _ = correct_z_attenuation(
+            im_final_stack['Original image'], model=opts["z_atten_model"],
+            strength=opts["z_atten_strength"],
+            channels=[stain_complete_df.index.get_loc(c) for c in conds], inplace=True)
     im_final_stack = run_normalize(im_final_stack, stain_complete_df=stain_complete_df)
     im_final_stack, r_zX, r_zY, r_zZ = run_resample(
         im_final_stack, stain_complete_df=stain_complete_df, zoom_factors=zooms, meta=meta,
     )
     im_final_stack = run_denoise(im_final_stack, stain_complete_df=stain_complete_df)
+    if opts["z_bg_radius_um"] > 0 and im_final_stack['Denoised image'].shape[0] > 1 \
+            and "NUCLEI" in stain_complete_df.index:  # v1.6.5
+        im_final_stack['Denoised image'] = correct_z_background(
+            im_final_stack['Denoised image'], opts["z_bg_radius_um"], (r_zZ, r_zY, r_zX),
+            percentile=opts["z_bg_percentile"],
+            channels=[stain_complete_df.index.get_loc("NUCLEI")])
     im_final_stack = run_contrast_gamma(im_final_stack, stain_complete_df=stain_complete_df)
     im_final_stack = run_smooth(im_final_stack, stain_complete_df=stain_complete_df, sigma=sigma)
     im_final_stack = run_equalize(
@@ -9974,6 +11409,8 @@ def _process_single_image_batch(
         cell_diameter=cell_diameter,
         r_zX=r_zX, r_zY=r_zY, r_zZ=r_zZ,
         threshold_method=threshold_method,
+        global_threshold_weight=opts["global_threshold_weight"],
+        sauvola_weight=opts["sauvola_weight"],
         progress=progress,
     )
 
@@ -9999,6 +11436,8 @@ def _process_single_image_batch(
             'Split gamma': split_gamma,
             'Split gamma step': split_gamma_step,
             'Min split piece fraction': min_piece_fraction,
+            **{f"Nuclei option {k}": v for k, v in opts.items()},
+            'Settings adapted to the image (v1.6.9)': adapted_note,
         },
     )
 
@@ -10022,6 +11461,7 @@ def _process_single_image_batch(
         split_gamma=split_gamma,
         split_gamma_step=split_gamma_step,
         min_piece_fraction=min_piece_fraction,
+        **{k: opts[k] for k in _BATCH_SEGMENT_NUCLEI_KEYS},
     )
     im_segmentation_stack, stain_complete_df = segment_cytoplasm(
         im_final_stack,
@@ -10191,10 +11631,18 @@ def run_batch_folder(
     split_gamma_step=0.0,
     min_piece_fraction=0.0,
     pcm_thickness_factor=0.05,
+    nuclei_options=None,
 ):
     """Process every supported image file in *input_folder* with the full
     pipeline and write each image's outputs into its own subfolder,
     ``<input_folder>_output/<image stem>/``.
+
+    ``nuclei_options`` (v1.6.8): the NUCLEI settings added in the nuclei
+    notebook v1.6.4-v1.6.8 (depth correction, haze removal, threshold
+    weights, Z elongation, flare trim, saddle / tall split, rescue, edges,
+    label growth) as a dict - keys and "off" values in
+    `BATCH_NUCLEI_OPTIONS`; missing keys stay off. Before v1.6.8 the batch
+    mode ran without them.
 
     Each file goes through the same steps as the single-file notebook
     (Cells 5-35) with the same settings, but without napari viewers, inline
@@ -10226,6 +11674,10 @@ def run_batch_folder(
 
     # Resolved once here so the warning isn't repeated for every image.
     trig_stardist = resolve_stardist_flag(trig_stardist)
+    unknown = set(nuclei_options or {}) - set(BATCH_NUCLEI_OPTIONS)
+    if unknown:  # fail before the first file, not once per file
+        raise ValueError(f"Unknown nuclei_options: {sorted(unknown)}; "
+                         f"known: {sorted(BATCH_NUCLEI_OPTIONS)}")
 
     image_files = list_image_files(input_folder)
     if not image_files:
@@ -10297,6 +11749,7 @@ def run_batch_folder(
                 split_gamma_step=split_gamma_step,
                 min_piece_fraction=min_piece_fraction,
                 pcm_thickness_factor=pcm_thickness_factor,
+                nuclei_options=nuclei_options,
             )
             results.append({
                 "File": image_path.name,
