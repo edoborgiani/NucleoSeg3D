@@ -2,6 +2,7 @@ from collections import defaultdict
 import gc
 import json
 import os
+import re
 import sys
 
 import cv2
@@ -144,6 +145,14 @@ __all__ = [
     "plot_ld_size_distributions",
     "export_live_dead_to_excel",
     "run_ld_batch_folder",
+    # LIVE/DEAD notebook v1.2.2: separate LIVE / DEAD files, validated settings
+    "combine_live_dead_inputs",
+    "ld_nuclear_conditions",
+    "ld_calibrated_nuclear_contrast",
+    "ld_adapt_settings_to_image",
+    "ld_remove_nuclear_haze",
+    "ld_correct_depth",
+    "adapt_scale_2d",
 ]
 
 
@@ -476,6 +485,109 @@ class _PlainTiffReader:
         )
 
 
+# LIVE/DEAD v1.2.2: a LIVE and a DEAD image acquired as two separate files are
+# read as one multichannel image through a small JSON "pair file" (written by
+# `combine_live_dead_inputs`). The pair file stands in for an image file
+# everywhere (loading, ROI, channel list, batch, output names), so the rest of
+# the pipeline does not need to know the channels come from two files.
+LD_PAIR_EXTENSION = ".ldpair"
+
+
+class _PairedImageReader:
+    """AICSImage-compatible reader for a LIVE/DEAD pair file (``.ldpair``).
+
+    The pair file lists the image files (LIVE first, then DEAD). Every file
+    is opened with `open_image_file`; their channels are stacked along C, in
+    that order, each named ``'<LABEL> - <channel name in its file>'`` (e.g.
+    ``'LIVE - EGFP'``, ``'DEAD - TRITC'``), so the names stay unique even when
+    both files call their channel 'Channel 1'. The files must have the same
+    Z, Y, X size and voxel size (1% tolerance; a voxel size missing in one
+    file is taken from the other).
+    """
+
+    def __init__(self, path: str):
+        with open(path, encoding="utf-8") as f:
+            record = json.load(f)
+        entries = record.get("files") or []
+        if len(entries) < 2:
+            raise ValueError(f"{path}: a LIVE/DEAD pair file needs at least two image files.")
+        base = os.path.dirname(os.path.abspath(path))
+        self.files, self.labels, self._metas = [], [], []
+        names, dates = [], []
+        for entry in entries:
+            file_path = entry["path"]
+            if not os.path.isabs(file_path):
+                file_path = os.path.join(base, file_path)
+            if not os.path.isfile(file_path):
+                raise FileNotFoundError(f"{path}: image file not found: {file_path}")
+            label = str(entry.get("label") or f"FILE {len(self.files) + 1}").upper()
+            meta = open_image_file(file_path)
+            n_c = int(meta.shape[1])
+            try:
+                file_meta = read_file_metadata(file_path, meta)
+            except Exception as exc:
+                print(f"[pair] Could not read the metadata of {os.path.basename(file_path)} ({exc}).")
+                file_meta = {"date": None, "channels": None}
+            ch = list(file_meta.get("channels") or [])
+            if len(ch) != n_c:
+                ch = list(getattr(meta, "channel_names", None) or [])
+            if len(ch) != n_c:
+                ch = [f"Channel {i + 1}" for i in range(n_c)]
+            names += [f"{label} - {c}" for c in ch]
+            dates.append(file_meta.get("date"))
+            self.files.append(file_path)
+            self.labels.append(label)
+            self._metas.append(meta)
+
+        zyx = [tuple(int(v) for v in m.shape[2:5]) for m in self._metas]
+        if len(set(zyx)) > 1:
+            raise ValueError(
+                "The LIVE and DEAD images must have the same size to be combined; (Z, Y, X) = "
+                + ", ".join(f"{l} {s}" for l, s in zip(self.labels, zyx)))
+        sizes = []
+        for axis in "XYZ":
+            values = [getattr(m.physical_pixel_sizes, axis) for m in self._metas]
+            known = [float(v) for v in values if v]
+            if known and (max(known) - min(known)) > 0.01 * max(known):
+                raise ValueError(
+                    f"The LIVE and DEAD images have different {axis} voxel sizes ("
+                    + ", ".join(f"{l} {v}" for l, v in zip(self.labels, values))
+                    + " um): they can't be combined voxel by voxel.")
+            sizes.append(known[0] if known else None)
+        self._pixel_sizes = _PhysicalPixelSizesOverride(*sizes)
+        self.channel_names = names
+        self.shape = (1, len(names)) + zyx[0]
+        self.dtype = np.result_type(*[np.dtype(getattr(m, "dtype", np.uint16)) for m in self._metas])
+        self.date = next((d for d in dates if d), None)
+        print(f"[pair] {len(self.files)} files combined into one {len(names)}-channel image "
+              f"(Z, Y, X) = {zyx[0]}:")
+        for label, file_path in zip(self.labels, self.files):
+            print(f"  {label}: {file_path}")
+
+    @property
+    def physical_pixel_sizes(self):
+        return self._pixel_sizes
+
+    def get_image_data(self, dim_order="ZYXC", T=0):
+        if dim_order != "ZYXC":
+            raise NotImplementedError(f"_PairedImageReader: dim_order '{dim_order}' is not supported")
+        return np.concatenate(
+            [np.asarray(m.get_image_data("ZYXC", T=0)).astype(self.dtype, copy=False)
+             for m in self._metas], axis=-1)
+
+    def get_image_dask_data(self, dim_order="ZYXC"):
+        import dask.array as da
+        if dim_order != "ZYXC":
+            raise NotImplementedError(f"_PairedImageReader: dim_order '{dim_order}' is not supported")
+        parts = []
+        for m in self._metas:
+            part = _lazy_image_data(m)
+            if isinstance(part, np.ndarray):
+                part = da.from_array(part, chunks=part.shape)
+            parts.append(part.astype(self.dtype))
+        return da.concatenate(parts, axis=-1)
+
+
 def _is_plain_tiff(input_file):
     """True for a .tif/.tiff file without OME metadata."""
     if not str(input_file).lower().endswith(('.tif', '.tiff')):
@@ -552,6 +664,9 @@ def open_image_file(input_file: str):
         (``shape``, ``physical_pixel_sizes``, ``get_image_data``,
         ``get_image_dask_data``).
     """
+    if str(input_file).lower().endswith(LD_PAIR_EXTENSION):
+        return _PairedImageReader(str(input_file))
+
     if str(input_file).lower().endswith('.oib'):
         return _OifFileReader(str(input_file))
 
@@ -926,6 +1041,9 @@ def read_file_metadata(input_file: str, meta) -> dict:
     """
     from pathlib import Path as _Path
     ext = _Path(input_file).suffix.lower()
+
+    if ext == LD_PAIR_EXTENSION:  # LIVE/DEAD pair file (v1.2.2)
+        return {"date": getattr(meta, "date", None), "channels": list(meta.channel_names)}
 
     if ext == '.nd2':
         try:
@@ -9033,6 +9151,46 @@ def measure_image_features(nuclei_zyx, voxel_size_zyx, contrast=None, measuremen
     return out
 
 
+def _scale_factor_change(nuclei_diameter, scale_factor, pixel_um, reference=None):
+    """The ``scale_factor`` rule of `adapt_nuclei_settings`: changed only if a
+    nucleus of ``nuclei_diameter`` would span fewer / more pixels than on the
+    tuned images (``reference['voxels_per_diameter']``), to the nearest end of
+    that range, as a multiple of 0.05 (at most 1.0: never upsampled).
+    Returns ``(name, old, new, reason)`` or None."""
+    ref = reference or AUTO_REFERENCE
+    d, s, r_xy = float(nuclei_diameter), float(scale_factor), float(pixel_um)
+    lo_vox, hi_vox = ref["voxels_per_diameter"]
+    vox = d * s / r_xy
+    if lo_vox <= vox <= hi_vox:
+        return None
+    steps = (lo_vox if vox < lo_vox else hi_vox) * r_xy / d / 0.05
+    steps = np.ceil(steps - 1e-9) if vox < lo_vox else np.floor(steps + 1e-9)
+    new_s = float(round(min(1.0, max(0.05, float(steps) * 0.05)), 2))
+    if abs(new_s - s) <= 1e-9:
+        return None
+    return ("scale_factor", s, new_s,
+            f"a nucleus spans {vox:.1f} voxels at {s:g}, {d * new_s / r_xy:.1f} at {new_s:g} "
+            f"(tuned range {lo_vox:g}-{hi_vox:g})")
+
+
+def adapt_scale_2d(nuclei_diameter, scale_factor, pixel_um, verbose=True):
+    """2D images: the nucleus can't be measured (that needs a 3D stack), so
+    only the resolution is adapted, with the ``scale_factor`` rule of the 3D
+    adaptation applied to the given ``nuclei_diameter``. Returns
+    ``(scale_factor, changes)``."""
+    change = _scale_factor_change(nuclei_diameter, scale_factor, pixel_um)
+    if verbose:
+        if change:
+            print(f"2D image: scale_factor {change[1]!r} -> {change[2]!r} ({change[3]}; "
+                  f"nucleus size not measured in 2D: nuclei_diameter {nuclei_diameter:g} um "
+                  "is used as given).")
+        else:
+            print(f"2D image: scale_factor {scale_factor:g} kept (a {nuclei_diameter:g} um "
+                  "nucleus already spans the tuned number of pixels; nucleus size not "
+                  "measured in 2D).")
+    return (change[2], [change]) if change else (float(scale_factor), [])
+
+
 def adapt_nuclei_settings(measurement, settings, voxel_size_zyx, reference=None,
                           min_measured=15, adapt_scale=True, diameter_tolerance=0.1,
                           verbose=True):
@@ -9085,21 +9243,10 @@ def adapt_nuclei_settings(measurement, settings, voxel_size_zyx, reference=None,
                                 f"{value:g} um for a {ref['nuclei_diameter']:g} um nucleus"))
                 out[name] = new
     if adapt_scale:
-        r_xy = float(voxel_size_zyx[-1])
-        s = float(settings["scale_factor"])
-        lo_vox, hi_vox = ref["voxels_per_diameter"]
-        vox = d * s / r_xy
-        if vox < lo_vox or vox > hi_vox:
-            # to a multiple of 0.05 inside the range
-            steps = (lo_vox if vox < lo_vox else hi_vox) * r_xy / d / 0.05
-            steps = np.ceil(steps - 1e-9) if vox < lo_vox else np.floor(steps + 1e-9)
-            new_s = float(round(min(1.0, max(0.05, float(steps) * 0.05)), 2))
-            if abs(new_s - s) > 1e-9:
-                changes.append(("scale_factor", s, new_s,
-                                f"a nucleus spans {vox:.1f} voxels at {s:g}, "
-                                f"{d * new_s / r_xy:.1f} at {new_s:g} "
-                                f"(tuned range {lo_vox:g}-{hi_vox:g})"))
-                out["scale_factor"] = new_s
+        change = _scale_factor_change(d, settings["scale_factor"], voxel_size_zyx[-1], ref)
+        if change:
+            changes.append(change)
+            out["scale_factor"] = change[2]
     if verbose:
         if changes:
             print("Settings adapted to the image:")
@@ -10799,8 +10946,10 @@ def export_fea_mesh(
 # Batch mode: input_file is a folder
 # ---------------------------------------------------------------------------
 
-# .ome.tif/.ome.tiff are covered by .tif/.tiff.
-SUPPORTED_IMAGE_EXTENSIONS = (".nd2", ".tif", ".tiff", ".czi", ".lif", ".oib")
+# .ome.tif/.ome.tiff are covered by .tif/.tiff. ".ldpair" = a LIVE/DEAD pair
+# file (two images read as one, see `combine_live_dead_inputs`).
+SUPPORTED_IMAGE_EXTENSIONS = (".nd2", ".tif", ".tiff", ".czi", ".lif", ".oib", LD_PAIR_EXTENSION)
+_RAW_IMAGE_EXTENSIONS = tuple(e for e in SUPPORTED_IMAGE_EXTENSIONS if e != LD_PAIR_EXTENSION)
 
 
 class BatchCompleted(Exception):
@@ -10832,6 +10981,107 @@ def list_image_files(input_folder, extensions=SUPPORTED_IMAGE_EXTENSIONS):
         p for p in _Path(input_folder).iterdir()
         if p.is_file() and p.suffix.lower() in extensions
     )
+
+
+def _ld_pair_stem(live_stem, dead_stem):
+    """Name of a LIVE/DEAD pair: the parts the two file names share
+    ('S1_live_20x' + 'S1_dead_20x' -> 'S1_20x'; the same name in two folders
+    -> that name), or 'live+dead' when the names have no common parts."""
+    split = re.compile(r'([_\-\s.]+)')
+    a, b = split.split(live_stem), split.split(dead_stem)
+    if len(a) == len(b):
+        parts = []
+        for i in range(0, len(a), 2):  # even = name parts, odd = separators
+            if a[i].lower() == b[i].lower():
+                if parts and i > 0:
+                    parts.append(a[i - 1])
+                parts.append(a[i])
+        stem = "".join(parts).strip("_-. ")
+        if stem:
+            return stem
+    return f"{live_stem}+{dead_stem}"
+
+
+def _write_ld_pair_file(path, live_file, dead_file):
+    record = {
+        "description": "LIVE/DEAD pair: the two images are read as one multichannel image "
+                       "(Fluo_3D_LD_seg v1.2.2).",
+        "files": [{"label": "LIVE", "path": os.path.abspath(str(live_file))},
+                  {"label": "DEAD", "path": os.path.abspath(str(dead_file))}],
+    }
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(record, f, indent=2)
+    return str(path)
+
+
+def combine_live_dead_inputs(input_file=None, input_file_live=None, input_file_dead=None,
+                             pair_folder=None):
+    """LIVE/DEAD v1.2.2, Cell 3: the input of the notebook, from either one
+    stacked image or a separate LIVE and DEAD image.
+
+    - ``input_file_live`` and ``input_file_dead`` both None: ``input_file``
+      (a stacked image with every channel, or a folder of them) is returned
+      unchanged.
+    - two **files**: a pair file ``<name>.ldpair`` is written next to the
+      LIVE file and returned; it is read as one image with the channels of
+      the LIVE file, then those of the DEAD file (named ``'LIVE - ...'`` and
+      ``'DEAD - ...'`` in the stain table). ``<name>`` is what the two file
+      names share (`_ld_pair_stem`) and names every output.
+    - two **folders** (batch mode): their images are paired in sorted name
+      order (both folders must hold the same number of images; the pairs are
+      printed -- check them), one pair file per pair is written into
+      ``pair_folder`` (default: ``<LIVE folder>_LD_pairs`` next to the LIVE
+      folder) and that folder is returned: the batch then runs on it and
+      writes to ``<pair folder>_output``.
+
+    The two images of a pair must have the same size and voxel size.
+    """
+    from pathlib import Path as _Path
+
+    if input_file_live is None and input_file_dead is None:
+        return input_file
+    if input_file_live is None or input_file_dead is None:
+        raise ValueError("Set both input_file_live and input_file_dead (or neither, to use "
+                         "the stacked image in input_file).")
+    live, dead = _Path(input_file_live), _Path(input_file_dead)
+    for p, what in ((live, "input_file_live"), (dead, "input_file_dead")):
+        if not p.exists():
+            raise FileNotFoundError(f"{what} not found: {p}")
+    if live.is_dir() != dead.is_dir():
+        raise ValueError("input_file_live and input_file_dead must be two files or two folders.")
+
+    if not live.is_dir():
+        if live.suffix.lower() not in _RAW_IMAGE_EXTENSIONS or \
+                dead.suffix.lower() not in _RAW_IMAGE_EXTENSIONS:
+            raise ValueError(f"Unsupported image file(s); supported: {', '.join(_RAW_IMAGE_EXTENSIONS)}")
+        stem = _ld_pair_stem(_image_stem(live), _image_stem(dead))
+        path = _write_ld_pair_file(live.parent / f"{stem}{LD_PAIR_EXTENSION}", live, dead)
+        print(f"Separate LIVE and DEAD images, read as one image '{stem}' (pair file {path}):")
+        print(f"  LIVE: {live}\n  DEAD: {dead}")
+        return path
+
+    live_files = list_image_files(live, extensions=_RAW_IMAGE_EXTENSIONS)
+    dead_files = list_image_files(dead, extensions=_RAW_IMAGE_EXTENSIONS)
+    if not live_files or len(live_files) != len(dead_files):
+        raise ValueError(
+            f"The LIVE folder holds {len(live_files)} image(s), the DEAD folder "
+            f"{len(dead_files)}: they must hold the same number (> 0), paired in name order.")
+    out = _Path(pair_folder) if pair_folder else live.parent / f"{live.name}_LD_pairs"
+    out.mkdir(parents=True, exist_ok=True)
+    for old in out.glob(f"*{LD_PAIR_EXTENSION}"):  # pair files of an earlier run
+        old.unlink()
+    print(f"Batch of separate LIVE and DEAD images: {len(live_files)} pair(s), paired in "
+          f"name order -- check that each LIVE image goes with its DEAD image:")
+    used = set()
+    for n, (lf, df) in enumerate(zip(live_files, dead_files), start=1):
+        stem = _ld_pair_stem(_image_stem(lf), _image_stem(df))
+        if stem.lower() in used:
+            stem = f"{_image_stem(lf)}+{_image_stem(df)}"
+        used.add(stem.lower())
+        _write_ld_pair_file(out / f"{stem}{LD_PAIR_EXTENSION}", lf, df)
+        print(f"  [{n}] {stem}:  LIVE {lf.name}  +  DEAD {df.name}")
+    print(f"Pair files written to {out}; outputs will go to {get_batch_output_dir(out)}")
+    return str(out)
 
 
 def _print_channel_names(channels, source):
@@ -11376,6 +11626,11 @@ def _process_single_image_batch(
             zooms = [z * scale_factor for z in zoom_factors]
         cyto_factor = int(np.round(cell_diameter / nuclei_diameter))
         adapted_note = "; ".join(f"{n} {o} -> {v}" for n, o, v, _ in changes) or "no change"
+    elif opts["auto_adapt"] and is_2d:  # 2D: resolution only, for the given nucleus size
+        scale_factor, changes = adapt_scale_2d(nuclei_diameter, scale_factor, r_X)
+        zooms = [z * scale_factor for z in zoom_factors]
+        zooms[0] = 1.0  # never resample a single plane along Z
+        adapted_note = "; ".join(f"{n} {o} -> {v}" for n, o, v, _ in changes) or "no change"
 
     # Cells 10-16
     if opts["z_atten_model"] != "off" and im_final_stack['Original image'].shape[0] > 2:  # v1.6.4
@@ -11808,6 +12063,16 @@ _LD_NUCLEAR_HINTS = ("DAPI", "HOECHST", "405", "DRAQ", "SYTO", "ETHD", "PROPIDIU
 def _guess_ld_channel(channels, condition, taken):
     free = [c for c in channels if c not in taken]
     keys = _LD_CHANNEL_HINTS.get(condition, ())
+    # v1.2.2, separate LIVE and DEAD files: the channels of the LIVE (DEAD)
+    # file are named 'LIVE - ...' ('DEAD - ...'): take one of those first.
+    from_file = [c for c in free if str(c).upper().startswith(f"{condition} - ")]
+    if from_file:
+        hinted = [c for c in from_file if any(key in str(c).upper()[len(condition) + 3:]
+                                              for key in keys)]
+        return (hinted or from_file)[0]
+    free = [c for c in free if not any(str(c).upper().startswith(f"{other} - ")
+                                       for other in _LD_FIXED_CONDITIONS if other != condition)] \
+        or free
     for channel in free:
         if any(key in str(channel).upper() for key in keys):
             return channel
@@ -12585,6 +12850,110 @@ def _ld_segment_objects_2d(
     return labels
 
 
+# -- LIVE/DEAD v1.2.2: the validated NUCLEI settings of the nuclei notebook
+# v1.6.4, applied to the markers set as nuclear ---------------------------------
+# In the nuclei notebook the per-image steps (calibrated contrast, size
+# adaptation, haze removal, depth correction) act on the NUCLEI channel; in
+# the LIVE/DEAD notebook the nuclei are segmented from the merged nuclear
+# markers, so the same steps act on every nuclear marker.
+
+def ld_nuclear_conditions(stain_df, localization):
+    """Conditions of *stain_df* set as nuclear, in channel order."""
+    nuclear, _ = _ld_channel_groups(stain_df, localization)
+    return [stain_df.index[c] for c in nuclear]
+
+
+def ld_calibrated_nuclear_contrast(im_original, stain_complete_df, original_stain_complete_df,
+                                   nuclear_conditions):
+    """Contrast / gamma of every nuclear marker from its own histogram (the
+    'calibrated' rule the NUCLEI settings were validated with,
+    `calibrated_contrast`), written into both stain tables. Returns
+    ``{condition: contrast}``."""
+    out = {}
+    for cond in nuclear_conditions:
+        contrast = calibrated_contrast(im_original[..., stain_complete_df.index.get_loc(cond)])
+        for col, value in contrast.items():
+            stain_complete_df.loc[cond, col] = value
+            original_stain_complete_df.loc[cond, col] = value
+        out[cond] = contrast
+        print(f"{cond} (nuclear) contrast from its own histogram: Cont_min {contrast['Cont_min']}, "
+              f"Cont_max {contrast['Cont_max']}, Gamma {contrast['Gamma']:g}")
+    if out:
+        print("(the nuclei segmentation settings were validated with this contrast rule)")
+    return out
+
+
+def _ld_nuclear_view(original_image, stain_complete_df, nuclear_conditions):
+    """The merged nuclear markers as the segmentation sees them: every
+    nuclear channel min-max normalized to 0-255 with its own contrast and
+    gamma (stain table), then the per-voxel maximum."""
+    merged = None
+    for cond in nuclear_conditions:
+        row = stain_complete_df.loc[cond]
+        ch = np.asarray(original_image[..., stain_complete_df.index.get_loc(cond)], dtype=np.float32)
+        lo, hi = float(ch.min()), float(ch.max())
+        ch = (ch - lo) / (hi - lo + 1e-8) * 255.0
+        ch = napari_contrast_gamma_uint8(ch, (float(row["Cont_min"]), float(row["Cont_max"])),
+                                         float(row["Gamma"]))
+        merged = ch if merged is None else np.maximum(merged, ch)
+    return merged
+
+
+def ld_adapt_settings_to_image(original_image, stain_complete_df, voxel_size_zyx,
+                               nuclear_conditions, settings, verbose=True):
+    """`adapt_settings_to_image` for the LIVE/DEAD notebook: the typical
+    nucleus is measured in the merged nuclear markers (`_ld_nuclear_view`)
+    and ``settings`` (``nuclei_diameter``, ``scale_factor`` and the um
+    settings) adapted to it. Returns ``(adapted settings, changes)``; nothing
+    changes without nuclear markers or when too few nuclei are measured
+    (e.g. a DEAD marker alone, with few dead cells)."""
+    if not nuclear_conditions:
+        if verbose:
+            print("No nuclear marker: settings not adapted to the image.")
+        return dict(settings), []
+    if verbose:
+        print("Typical nucleus measured in the nuclear marker(s): " + ", ".join(nuclear_conditions))
+    view = _ld_nuclear_view(original_image, stain_complete_df, nuclear_conditions)
+    measurement = measure_nuclei_in_image(view, voxel_size_zyx, contrast=None, verbose=verbose)
+    del view
+    return adapt_nuclei_settings(measurement, settings, voxel_size_zyx, verbose=verbose)
+
+
+def ld_remove_nuclear_haze(denoised, stain_complete_df, nuclear_conditions, radius_um,
+                           voxel_size_zyx, percentile=25.0):
+    """Slice-by-slice haze removal (`correct_z_background`) of the nuclear
+    markers' 'Denoised image' channels. Returns the (new) array."""
+    if not radius_um or radius_um <= 0 or denoised.shape[0] <= 1 or not nuclear_conditions:
+        return denoised
+    out = correct_z_background(
+        denoised, radius_um, tuple(voxel_size_zyx), percentile=percentile,
+        channels=[stain_complete_df.index.get_loc(c) for c in nuclear_conditions])
+    print(f"Haze of the nuclear marker(s) {', '.join(nuclear_conditions)} removed slice by "
+          f"slice (radius {radius_um:.3g} um).")
+    return out
+
+
+def ld_correct_depth(original, stain_complete_df, nuclear_conditions, conditions, model="exp",
+                     strength=1.0):
+    """Depth (Z attenuation) correction, `correct_z_attenuation`, of the LIVE/DEAD
+    channels: ``conditions`` = 'all' or a list of conditions, where 'NUCLEI'
+    stands for every nuclear marker. Returns ``(image, profiles, names)``."""
+    if conditions == "all":
+        conds = list(stain_complete_df.index)
+    else:
+        conds = []
+        for c in conditions:
+            for cond in (nuclear_conditions if str(c).upper() == "NUCLEI" else [c]):
+                if cond in stain_complete_df.index and cond not in conds:
+                    conds.append(cond)
+    if not conds or original.shape[0] <= 2:
+        return original, None, conds
+    image, profiles = correct_z_attenuation(
+        original, model=model, strength=strength,
+        channels=[stain_complete_df.index.get_loc(c) for c in conds], inplace=True)
+    return image, profiles, conds
+
+
 def segment_ld_nuclei(
     im_final_stack,
     stain_df,
@@ -12604,8 +12973,17 @@ def segment_ld_nuclei(
     split_gamma_step=0.0,
     min_piece_fraction=0.2,
     progress=None,
+    **nuclei_options,
 ):
     """LD Cell 17: segment the nuclei from the markers set as **nuclear**.
+
+    v1.2.2: ``nuclei_options`` are the v1.6.4 NUCLEI options of
+    `segment_nuclei` (``z_elongation``, ``nuclei_flare_trim_factor``,
+    ``nuclei_saddle_dip``, ``nuclei_tall_*``, ``nuclei_rescue_*``,
+    ``nuclei_edge_*``, ``nuclei_expand_um``), applied to the merged nuclear
+    markers on 3D images (off when not given, as in v1.2.1). The split gamma
+    is applied by `segment_nuclei` itself, so these steps see the linear
+    intensity.
 
     Their threshold masks (Cell 15) are merged into one nuclei mask, which is
     segmented exactly like the NUCLEI channel of the nuclei notebook
@@ -12659,11 +13037,14 @@ def segment_ld_nuclei(
         )
         return {'Nuclei': labels[np.newaxis]}
 
-    merged, refine_gammas = _ld_gamma_substack(
-        _ld_merged_substack(im_final_stack, nuclear), "nuclei",
-        split_gamma, split_gamma_step, deep_learning=trig_cellpose or trig_stardist,
-    )
+    unknown = set(nuclei_options) - set(_BATCH_SEGMENT_NUCLEI_KEYS)
+    if unknown:
+        raise TypeError(f"segment_ld_nuclei: unknown option(s) {sorted(unknown)}")
+    merged = _ld_merged_substack(im_final_stack, nuclear)
     sub_df = _ld_single_channel_df('+'.join(str(stain_df['Marker'].iloc[c]) for c in nuclear))
+    # The split gamma is applied inside segment_nuclei (NUCLEI path): only to
+    # the intensity used for the split, so the v1.6.4 steps after the
+    # watershed (saddle / tall split, rescue, edges) get the linear signal.
     seg = segment_nuclei(
         merged,
         stain_df=sub_df,
@@ -12680,8 +13061,10 @@ def segment_ld_nuclei(
         undersize_factor=undersize_factor,
         size_reference=size_reference,
         progress=progress,
-        refine_gamma_levels=refine_gammas,
+        split_gamma=split_gamma,
+        split_gamma_step=split_gamma_step,
         min_piece_fraction=min_piece_fraction,
+        **nuclei_options,
     )
     return {'Nuclei': np.asarray(seg['Nuclei'], dtype=np.int32)}
 
@@ -13726,12 +14109,25 @@ def _process_single_image_ld_batch(
     split_gamma=1.0,
     split_gamma_step=0.0,
     min_piece_fraction=0.2,
+    nuclei_split_config=None,
+    nuclei_options=None,
 ):
     """Run the LIVE/DEAD notebook (Cells 4-33) on one file, without viewers,
     inline plots or PNG subfolders, writing every output file into
     *output_dir*. Returns this image's LIVE/DEAD counts. A 2D image (single
     plane) is segmented in 2D, its sizes are areas and the 3D mesh exports
-    are skipped."""
+    are skipped.
+
+    v1.2.2: ``nuclei_split_config`` (watershed split configuration, nuclei
+    and cell bodies) and ``nuclei_options`` (the v1.6.4 NUCLEI options of
+    `BATCH_NUCLEI_OPTIONS`, applied to the nuclear markers; missing keys =
+    off, as in v1.2.1)."""
+    opts = dict(BATCH_NUCLEI_OPTIONS, **(nuclei_options or {}))
+    unknown = set(opts) - set(BATCH_NUCLEI_OPTIONS)
+    if unknown:
+        raise ValueError(f"Unknown nuclei_options: {sorted(unknown)}")
+    if opts["nuclei_contrast"] not in (None, "calibrated"):
+        raise ValueError("nuclei_options['nuclei_contrast'] must be None or 'calibrated'")
     roi = list(roi_coords)
     if interactive_roi:
         roi = select_roi_interactively(input_file, roi, napari_module=napari_module,
@@ -13770,13 +14166,47 @@ def _process_single_image_ld_batch(
         progress=progress,
     )
 
-    # Cells 9-15
+    # v1.2.2: nuclear markers' contrast and size adaptation (Cell 8)
     nuclear_conditions = [c for c, v in _ld_localization_map(localization).items() if v == 'nuclear']
+    nuclear_in_image = ld_nuclear_conditions(stain_df, localization)
+    if opts["nuclei_contrast"] == "calibrated":
+        ld_calibrated_nuclear_contrast(im_final_stack['Original image'], stain_complete_df,
+                                       original_stain_complete_df, nuclear_in_image)
+    adapted_note = "off"
+    if opts["auto_adapt"] and not is_2d and nuclear_in_image:
+        adapted, changes = ld_adapt_settings_to_image(
+            im_final_stack['Original image'], stain_complete_df, (r_Z, r_Y, r_X),
+            nuclear_in_image,
+            {"nuclei_diameter": nuclei_diameter, "scale_factor": scale_factor,
+             "z_bg_radius_um": opts["z_bg_radius_um"],
+             "nuclei_edge_margin_um": opts["nuclei_edge_margin_um"]})
+        nuclei_diameter = adapted["nuclei_diameter"]
+        opts["z_bg_radius_um"] = adapted["z_bg_radius_um"]
+        opts["nuclei_edge_margin_um"] = adapted["nuclei_edge_margin_um"]
+        if adapted["scale_factor"] != scale_factor:
+            scale_factor = adapted["scale_factor"]
+            zooms = [z * scale_factor for z in zoom_factors]
+        adapted_note = "; ".join(f"{n} {o} -> {v}" for n, o, v, _ in changes) or "no change"
+    elif opts["auto_adapt"] and is_2d:  # 2D: resolution only, for the given nucleus size
+        scale_factor, changes = adapt_scale_2d(nuclei_diameter, scale_factor, r_X)
+        zooms = [z * scale_factor for z in zoom_factors]
+        zooms[0] = 1.0  # never resample a single plane along Z
+        adapted_note = "; ".join(f"{n} {o} -> {v}" for n, o, v, _ in changes) or "no change"
+
+    # Cells 9-15
+    if opts["z_atten_model"] != "off":  # v1.2.2
+        im_final_stack['Original image'], _, _ = ld_correct_depth(
+            im_final_stack['Original image'], stain_complete_df, nuclear_in_image,
+            opts["z_atten_conditions"], model=opts["z_atten_model"],
+            strength=opts["z_atten_strength"])
     im_final_stack = run_normalize(im_final_stack, stain_complete_df=stain_complete_df)
     im_final_stack, r_zX, r_zY, r_zZ = run_resample(
         im_final_stack, stain_complete_df=stain_complete_df, zoom_factors=zooms, meta=meta,
     )
     im_final_stack = run_denoise(im_final_stack, stain_complete_df=stain_complete_df)
+    im_final_stack['Denoised image'] = ld_remove_nuclear_haze(  # v1.2.2
+        im_final_stack['Denoised image'], stain_complete_df, nuclear_in_image,
+        opts["z_bg_radius_um"], (r_zZ, r_zY, r_zX), percentile=opts["z_bg_percentile"])
     im_final_stack = run_contrast_gamma(im_final_stack, stain_complete_df=stain_complete_df)
     im_final_stack = run_smooth(im_final_stack, stain_complete_df=stain_complete_df, sigma=sigma)
     im_final_stack = run_equalize(
@@ -13790,6 +14220,8 @@ def _process_single_image_ld_batch(
         cell_diameter=cell_diameter,
         r_zX=r_zX, r_zY=r_zY, r_zZ=r_zZ,
         threshold_method=threshold_method,
+        global_threshold_weight=opts["global_threshold_weight"],
+        sauvola_weight=opts["sauvola_weight"],
         nuclear_conditions=nuclear_conditions,
         progress=progress,
     )
@@ -13804,6 +14236,12 @@ def _process_single_image_ld_batch(
     ld_params['Split gamma'] = split_gamma
     ld_params['Split gamma step'] = split_gamma_step
     ld_params['Min split piece fraction'] = min_piece_fraction
+    ld_params['Scale factor'] = scale_factor
+    if nuclei_split_config is not None:
+        ld_params['Watershed split config'] = str(nuclei_split_config)
+    ld_params.update({f"Nuclei option {k}": (str(v) if isinstance(v, (list, dict)) else v)
+                      for k, v in opts.items()})
+    ld_params['Settings adapted to the image'] = adapted_note
     export_channel_histograms(
         im_final_stack, stain_complete_df, input_file,
         ROI_print=ROI_print, lazy_loading_used=used_lazy_loading,
@@ -13815,6 +14253,9 @@ def _process_single_image_ld_batch(
         multilabel=multilabel,
         sigma=sigma, num_plateaus=num_plateaus, plateau_factor=plateau_factor,
         threshold_method=threshold_method,
+        global_threshold_weight=opts["global_threshold_weight"],
+        sauvola_weight=opts["sauvola_weight"],
+        nuclei_split_config=nuclei_split_config,
         aggregate_distance_factor=None,  # no aggregates / PCM in the LD analysis
         progress=progress,
         output_dir=output_dir,
@@ -13832,6 +14273,7 @@ def _process_single_image_ld_batch(
         split_gamma=split_gamma,
         split_gamma_step=split_gamma_step,
         min_piece_fraction=min_piece_fraction,
+        nuclei_split_config=nuclei_split_config,
         progress=progress,
     )
     im_segmentation_stack = segment_ld_nuclei(
@@ -13843,6 +14285,7 @@ def _process_single_image_ld_batch(
         trig_stardist=trig_stardist,
         trig_cellpose=trig_cellpose,
         **size_kwargs,
+        **{k: opts[k] for k in _BATCH_SEGMENT_NUCLEI_KEYS},  # v1.2.2
     )
     im_segmentation_stack, stain_complete_df = segment_ld_cells(
         im_final_stack,
@@ -14009,12 +14452,20 @@ def run_ld_batch_folder(
     split_gamma=1.0,
     split_gamma_step=0.0,
     min_piece_fraction=0.2,
+    nuclei_split_config=None,
+    nuclei_options=None,
 ):
     """Process every supported image file in *input_folder* with the full
     LIVE/DEAD pipeline and write each image's outputs into its own
     subfolder, ``<input_folder>_output/<image stem>/`` -- the LD counterpart
     of `run_batch_folder` (same rules for the contrast setup, failed files
-    and outputs).
+    and outputs). The folder may hold LIVE/DEAD pair files (``.ldpair``,
+    `combine_live_dead_inputs`) instead of stacked images.
+
+    v1.2.2: ``nuclei_split_config`` and ``nuclei_options`` (see
+    `_process_single_image_ld_batch`) carry the validated settings of the
+    nuclei notebook v1.6.4 (`helpers.optimal_settings_ld.ld_batch_settings`);
+    every image gets its own nuclear-marker contrast and size adaptation.
 
     Returns
     -------
@@ -14074,6 +14525,8 @@ def run_ld_batch_folder(
                 split_gamma=split_gamma,
                 split_gamma_step=split_gamma_step,
                 min_piece_fraction=min_piece_fraction,
+                nuclei_split_config=nuclei_split_config,
+                nuclei_options=nuclei_options,
                 iterative_split=iterative_split,
                 oversize_factor=oversize_factor,
                 max_split_iterations=max_split_iterations,

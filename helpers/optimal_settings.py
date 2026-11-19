@@ -100,7 +100,11 @@ def adapt_to_image(im_original, stain_complete_df, voxel_size_zyx, nuclei_diamet
     if not opt["auto_adapt_settings"]:
         print("Settings not adapted to the image (auto_adapt_settings = False).")
     elif is_2d:
-        print("2D image: settings not adapted (the measure needs a 3D stack).")
+        # The nucleus can't be measured in 2D; only the resolution is adapted,
+        # to the given nuclei_diameter.
+        from helpers.notebook_helpers import adapt_scale_2d
+        opt["scale_factor"], changes = adapt_scale_2d(
+            nuclei_diameter, opt["scale_factor"], voxel_size_zyx[-1])
     elif "NUCLEI" not in stain_complete_df.index:
         print("No NUCLEI channel: settings not adapted.")
     else:

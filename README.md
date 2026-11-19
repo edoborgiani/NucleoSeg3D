@@ -12,6 +12,12 @@ Current version: **v1.6.4** (`NucleoSeg3D_v1.6.4.ipynb`).
 - **Calibrated automatic contrast** for the marker channels: `automatic_contrast = 'calibrated'`.
 - Batch mode applies all of the above to every image.
 
+### LIVE/DEAD notebook: v1.2.2 (`Fluo_3D_LD_seg_v1.2.2.ipynb`)
+Segments LIVE/DEAD-stained images and calls every cell LIVE or DEAD, with the same workflow as NucleoSeg3D v1.6.4.
+- **Separate LIVE and DEAD images**: set `input_file_live` and `input_file_dead` (Cell 3) instead of one stacked `input_file`. The two images must have the same size and voxel size. They are read as one image through a small pair file (`<name>.ldpair`, written next to the LIVE file). The stain table lists their channels as `'LIVE - ...'` and `'DEAD - ...'`. With two folders (batch mode), the images are paired in name order and the pairs are printed. The outputs go to `<LIVE folder>_LD_pairs_output/`.
+- **Validated settings of v1.6.4**: read from the same `helpers/optimal_settings_v1.6.4.json` and changed by name with `custom_settings` (Cell 4). The nuclei are segmented from the **nuclear** markers. So the contrast of each nuclear marker comes from its own histogram, the typical nucleus is measured in them, and they get every validated nuclei step. The cell bodies (**cytoplasmic** markers) get the validated smoothing, threshold, watershed split and size refinement. The steps after the watershed (Z split, rescue, edges) were validated on nuclei only, so the cell bodies skip them.
+- The LIVE/DEAD call (`min_positive_fraction`, `ld_rule`) stays an experiment choice in Cell 3.
+
 > **Disclaimer:** This repository is freely available for use. The associated pipeline is currently being prepared for publication — please contact [Edoardo Borgiani](https://github.com/edoborgiani) for more information on how to use the pipeline or for collaboration enquiries.
 
 ## Features
@@ -34,6 +40,8 @@ Current version: **v1.6.4** (`NucleoSeg3D_v1.6.4.ipynb`).
 .
 ├── NucleoSeg3D_v1.6.4.ipynb        # The NucleoSeg3D notebook (current)
 ├── NucleoSeg3D_v1.6.3.ipynb        # Previous version
+├── Fluo_3D_LD_seg_v1.2.2.ipynb     # LIVE/DEAD notebook (current)
+├── Fluo_3D_LD_seg_v1.2.1.ipynb     # LIVE/DEAD notebook, previous version
 ├── requirements.txt                # Python dependencies
 ├── overrides.txt                   # uv --override file (see Prerequisites)
 ├── README.md                       # This file
@@ -42,6 +50,7 @@ Current version: **v1.6.4** (`NucleoSeg3D_v1.6.4.ipynb`).
     ├── notebook_helpers.py         # Core processing, segmentation, and export functions
     ├── notebook_setup_helpers.py   # Package installation and import loader
     ├── optimal_settings.py         # Loads the validated settings and applies them per image
+    ├── optimal_settings_ld.py      # The same settings for the LIVE/DEAD notebook (nuclear markers)
     └── optimal_settings_v1.6.4.json # Validated segmentation settings and their scores
 ```
 
@@ -280,6 +289,7 @@ On a server without a display (e.g. an HPC cluster over SSH), napari needs a vir
 2D images (a file without a Z stack, or a ROI with a single Z slice) are handled automatically; the image-loading cell (Cell 5) prints whether the image is 2D or 3D and sets `is_2d`.
 - **Loading:** no Z voxel size is asked — the plane is given a 1 µm thickness, so every "volume" the pipeline computes is the area in µm². Resampling never adds planes along Z.
 - **Reading plain TIFFs:** a TIFF without OME metadata is read from its own dimensions (singleton axes dropped): 2 = one 2D channel, 3 = a 2D image with channels, 4 = a 3D stack with channels (the smaller of the two extra axes is taken as the channel axis). Channel axes stated by the file (ImageJ hyperstack, RGB samples) are used as they are. OME-TIFFs are read through aicsimageio.
+- **Resolution and nucleus size:** the nucleus can't be measured in a single plane, so `nuclei_diameter` (Cell 3) is used as given: set it to the real nucleus size. The resolution (`scale_factor`) is still adapted, with the 3D rule applied to that diameter: a nucleus spans the same 12–19 pixels as on the tuned images, and the image is never upsampled. Haze removal and depth correction are skipped.
 - **Processing:** median, Gaussian and Sauvola filters run in 2D on the plane.
 - **Segmentation:** nuclei are segmented in the image plane — a watershed seeded at every bright centre separated from its neighbours by an intensity dip (so touching objects that form one round blob are still split), or Cellpose / StarDist in 2D mode — followed by the same size refinement on areas. The cytoplasm is built in the plane (membrane rings closed with a disk, Cellpose in 2D mode).
 - **Outputs:** every size is an area (`[um2]` columns, "area" in the summaries, plots and Excel report); the spatial plots show X and Y only; the VTK, STL, single-cell VTK and FEA exports are skipped.
