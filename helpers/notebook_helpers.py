@@ -132,7 +132,7 @@ __all__ = [
     # Splitting improvements (LD v1.2.1, nuclei v1.6.3)
     "apply_split_gamma",
     "absorb_small_split_pieces",
-    # LIVE/DEAD notebook (Fluo_3D_LD_seg v1.2.1)
+    # LIVE/DEAD notebook (NucleoSeg3D_LD, since v1.2.1)
     "LDStainDictEditor",
     "edit_ld_stain_dict",
     "segment_ld_nuclei",
@@ -11005,7 +11005,7 @@ def _ld_pair_stem(live_stem, dead_stem):
 def _write_ld_pair_file(path, live_file, dead_file):
     record = {
         "description": "LIVE/DEAD pair: the two images are read as one multichannel image "
-                       "(Fluo_3D_LD_seg v1.2.2).",
+                       "(NucleoSeg3D_LD v1.2.2).",
         "files": [{"label": "LIVE", "path": os.path.abspath(str(live_file))},
                   {"label": "DEAD", "path": os.path.abspath(str(dead_file))}],
     }
@@ -12036,7 +12036,7 @@ def run_batch_folder(
 
 
 # ---------------------------------------------------------------------------
-# LIVE/DEAD notebook (Fluo_3D_LD_seg v1.2.1)
+# LIVE/DEAD notebook (NucleoSeg3D_LD, since v1.2.1)
 # ---------------------------------------------------------------------------
 # The LD notebook follows the nuclei notebook (v1.6.2) step by step. Its stain
 # table has fixed LIVE and DEAD rows (plus optional extra stains) and, instead

@@ -1,4 +1,4 @@
-"""Validated settings for the LIVE/DEAD notebook (Fluo_3D_LD_seg v1.2.2).
+"""Validated settings for the LIVE/DEAD notebook (NucleoSeg3D_LD_v1.2.2.ipynb).
 
 The LIVE/DEAD notebook uses the same validated settings as the nuclei
 notebook v1.6.4, read from ``optimal_settings_v1.6.4.json``

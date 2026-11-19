@@ -12,7 +12,7 @@ Current version: **v1.6.4** (`NucleoSeg3D_v1.6.4.ipynb`).
 - **Calibrated automatic contrast** for the marker channels: `automatic_contrast = 'calibrated'`.
 - Batch mode applies all of the above to every image.
 
-### LIVE/DEAD notebook: v1.2.2 (`Fluo_3D_LD_seg_v1.2.2.ipynb`)
+### LIVE/DEAD notebook: v1.2.2 (`NucleoSeg3D_LD_v1.2.2.ipynb`)
 Segments LIVE/DEAD-stained images and calls every cell LIVE or DEAD, with the same workflow as NucleoSeg3D v1.6.4.
 - **Separate LIVE and DEAD images**: set `input_file_live` and `input_file_dead` (Cell 3) instead of one stacked `input_file`. The two images must have the same size and voxel size. They are read as one image through a small pair file (`<name>.ldpair`, written next to the LIVE file). The stain table lists their channels as `'LIVE - ...'` and `'DEAD - ...'`. With two folders (batch mode), the images are paired in name order and the pairs are printed. The outputs go to `<LIVE folder>_LD_pairs_output/`.
 - **Validated settings of v1.6.4**: read from the same `helpers/optimal_settings_v1.6.4.json` and changed by name with `custom_settings` (Cell 4). The nuclei are segmented from the **nuclear** markers. So the contrast of each nuclear marker comes from its own histogram, the typical nucleus is measured in them, and they get every validated nuclei step. The cell bodies (**cytoplasmic** markers) get the validated smoothing, threshold, watershed split and size refinement. The steps after the watershed (Z split, rescue, edges) were validated on nuclei only, so the cell bodies skip them.
@@ -40,8 +40,7 @@ Segments LIVE/DEAD-stained images and calls every cell LIVE or DEAD, with the sa
 .
 ├── NucleoSeg3D_v1.6.4.ipynb        # The NucleoSeg3D notebook (current)
 ├── NucleoSeg3D_v1.6.3.ipynb        # Previous version
-├── Fluo_3D_LD_seg_v1.2.2.ipynb     # LIVE/DEAD notebook (current)
-├── Fluo_3D_LD_seg_v1.2.1.ipynb     # LIVE/DEAD notebook, previous version
+├── NucleoSeg3D_LD_v1.2.2.ipynb     # The LIVE/DEAD notebook (current)
 ├── requirements.txt                # Python dependencies
 ├── overrides.txt                   # uv --override file (see Prerequisites)
 ├── README.md                       # This file
