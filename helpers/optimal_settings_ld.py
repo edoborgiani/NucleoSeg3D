@@ -13,9 +13,10 @@ channel; here the nuclei are segmented from the merged **nuclear** markers
   ``nuclei_diameter``, ``scale_factor`` and the um sizes adapted to it;
 - the haze removal (and the depth correction, off in the validated
   settings) acts on the nuclear markers;
-- the nuclei get every validated segmentation step (watershed split
+- the nuclei get the validated segmentation steps (watershed split
   configuration, split gamma, size refinement, Z elongation, flare trim,
-  saddle / tall split, rescue of missed nuclei, edges);
+  saddle / tall split, edges); the rescue of missed nuclei is off
+  (`LD_OVERRIDES`);
 - the cell bodies (cytoplasmic markers, e.g. LIVE = calcein) get the
   validated smoothing, threshold, watershed split configuration, split gamma
   and size refinement. The steps after the watershed were validated on
@@ -28,6 +29,29 @@ experiment choice, set in Cell 3.
 from helpers.optimal_settings import (  # noqa: F401  (re-exported for the notebook)
     SETTINGS_FILE, _SEGMENT_KEYS, _BATCH_OPTION_KEYS, load_optimal_settings,
     settings_for_report)
+
+# Validated values that do not fit the LIVE/DEAD analysis. The rescue of
+# missed nuclei adds nuclei the threshold left out; in the LIVE/DEAD notebook
+# positivity is read from the threshold masks, so a rescued nucleus is
+# positive for no marker (no LIVE/DEAD call), and it would undo the
+# bright-signal filter (`ld_binary_threshold`). custom_settings still
+# override these.
+LD_OVERRIDES = {"nuclei_rescue_contrast": 0.0}
+
+
+def load_ld_settings(custom_settings=None, verbose=True):
+    """The validated settings (``optimal_settings_v1.6.4.json``) with the
+    LIVE/DEAD changes of ``LD_OVERRIDES``, then ``custom_settings`` on top."""
+    custom = dict(custom_settings or {})
+    opt = load_optimal_settings({**LD_OVERRIDES, **custom}, verbose=verbose)
+    if verbose:
+        changed = {k: v for k, v in LD_OVERRIDES.items() if k not in custom}
+        if changed:
+            print("LIVE/DEAD: " + ", ".join(f"{k} = {v!r}" for k, v in changed.items())
+                  + " (rescue of missed nuclei off: positivity is read from the "
+                  "threshold masks).")
+    return opt
+
 
 # Size refinement / splitting settings shared by the nuclei and the cell bodies.
 _SHARED_SEGMENT_KEYS = (

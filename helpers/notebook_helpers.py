@@ -153,6 +153,9 @@ __all__ = [
     "ld_remove_nuclear_haze",
     "ld_correct_depth",
     "adapt_scale_2d",
+    "ld_binary_threshold",
+    "ld_role",
+    "ld_call_conditions",
 ]
 
 
@@ -12060,6 +12063,23 @@ _LD_CHANNEL_HINTS = {
 _LD_NUCLEAR_HINTS = ("DAPI", "HOECHST", "405", "DRAQ", "SYTO", "ETHD", "PROPIDIUM", "7-AAD")
 
 
+def ld_role(condition):
+    """v1.2.2: the part a condition plays in the LIVE/DEAD call: 'LIVE' for
+    LIVE and LIVE_<n> (e.g. a Hoechst counterstain added as LIVE_2: a cell
+    with that stain only is LIVE), 'DEAD' for DEAD and DEAD_<n>, None for any
+    other stain (segmented and quantified, not in the call)."""
+    name = str(condition).upper()
+    for role in _LD_FIXED_CONDITIONS:
+        if name == role or re.fullmatch(rf"{role}_\d+", name):
+            return role
+    return None
+
+
+def ld_call_conditions(conditions, role):
+    """The conditions of *conditions* in the LIVE or DEAD group (`ld_role`)."""
+    return [c for c in conditions if ld_role(c) == role]
+
+
 def _guess_ld_channel(channels, condition, taken):
     free = [c for c in channels if c not in taken]
     keys = _LD_CHANNEL_HINTS.get(condition, ())
@@ -12090,9 +12110,10 @@ def _guess_ld_localization(channel, condition):
 
 def _default_ld_stain_rows(channels):
     """Preliminary LIVE/DEAD stain table: LIVE on a green-like channel
-    (cytoplasmic, e.g. calcein), DEAD on a red-like channel (nuclear, e.g.
-    ethidium homodimer or propidium iodide), and one STAIN_<n> row per
-    remaining channel."""
+    (cytoplasmic, e.g. calcein) and DEAD on a red-like channel (nuclear, e.g.
+    ethidium homodimer or propidium iodide). v1.2.2: only these two rows --
+    any other stain (e.g. a Hoechst counterstain) is added with 'Add stain';
+    the channels left out are listed below the table."""
     taken, rows = [], []
     for condition in _LD_FIXED_CONDITIONS:
         channel = _guess_ld_channel(channels, condition, taken)
@@ -12101,11 +12122,6 @@ def _default_ld_stain_rows(channels):
         rows.append(dict(condition=condition, marker="", channel=channel,
                          color="green" if condition == "LIVE" else "red",
                          localization=_guess_ld_localization(channel, condition)))
-    rest = [c for c in channels if c not in taken]
-    for i, channel in enumerate(rest, start=1):
-        rows.append(dict(condition=f"STAIN_{i}", marker="", channel=channel,
-                         color=_guess_channel_color(channel, i + 1),
-                         localization=_guess_ld_localization(channel, "")))
     return rows
 
 
@@ -12154,8 +12170,17 @@ class LDStainDictEditor:
             grid_gap="4px 10px",
             align_items="center",
         ))
-        add_button = widgets.Button(description="Add stain", icon="plus")
+        add_button = widgets.Button(description="Add other stain", icon="plus",
+                                    tooltip="Segmented and quantified, not in the LIVE/DEAD call")
         add_button.on_click(lambda _: self._add_row(self._new_stain_row()))
+        # v1.2.2: extra markers of the call, e.g. Hoechst as LIVE_2
+        add_live = widgets.Button(description="Add LIVE stain", icon="plus",
+                                  tooltip="Another LIVE marker (LIVE_2, ...): a cell positive "
+                                          "for it only is LIVE, with a DEAD marker too DEAD")
+        add_live.on_click(lambda _: self._add_row(self._new_stain_row("LIVE")))
+        add_dead = widgets.Button(description="Add DEAD stain", icon="plus",
+                                  tooltip="Another DEAD marker (DEAD_2, ...)")
+        add_dead.on_click(lambda _: self._add_row(self._new_stain_row("DEAD")))
         confirm_button = widgets.Button(description="Confirm", icon="check",
                                         button_style="success")
         confirm_button.on_click(self._on_confirm)
@@ -12165,9 +12190,12 @@ class LDStainDictEditor:
             widgets.HTML("<b>LIVE/DEAD stain table</b> -- pick each condition's channel "
                          "('no' = not used) and color, type the marker names, choose "
                          "whether each marker is <b>nuclear</b> or <b>cytoplasmic</b>, "
-                         "then click <b>Confirm</b>."),
+                         "then click <b>Confirm</b>.<br>Extra stains: <b>Add LIVE stain</b> "
+                         "(LIVE_2, ...; e.g. Hoechst: a cell with it only is LIVE, with a DEAD "
+                         "marker too it is DEAD), <b>Add DEAD stain</b> (DEAD_2, ...) or "
+                         "<b>Add other stain</b> (not in the call)."),
             self._grid,
-            widgets.HBox([add_button, confirm_button]),
+            widgets.HBox([add_live, add_dead, add_button, confirm_button]),
             self._status,
             self._output,
         ])
@@ -12206,11 +12234,29 @@ class LDStainDictEditor:
         return rows
 
     # -- rows ---------------------------------------------------------------
-    def _new_stain_row(self):
+    def _new_stain_row(self, role=None):
         taken = {r["condition"] for r in self._values()}
+        if role:  # v1.2.2: LIVE_2, DEAD_2, ... (extra markers of the call)
+            n = 2
+            while f"{role}_{n}" in taken:
+                n += 1
+            used = {r["channel"] for r in self._values()}
+            free = [c for c in self.channels if c not in used]
+            channel = free[0] if free else _STAIN_NO_CHANNEL
+            return dict(condition=f"{role}_{n}", marker="", channel=channel,
+                        color=_guess_channel_color(channel, n + 1),
+                        localization=_guess_ld_localization(channel, ""))
         n = 1
         while f"STAIN_{n}" in taken:
             n += 1
+        # v1.2.2: the first channel not used yet, with its guessed color and
+        # localization (e.g. a Hoechst / DAPI channel -> nuclear, blue).
+        used = {r["channel"] for r in self._values()}
+        free = [c for c in self.channels if c not in used]
+        if free:
+            return dict(condition=f"STAIN_{n}", marker="", channel=free[0],
+                        color=_guess_channel_color(free[0], n + 1),
+                        localization=_guess_ld_localization(free[0], ""))
         return dict(condition=f"STAIN_{n}", marker="", channel=_STAIN_NO_CHANNEL,
                     color=STAIN_COLORS[n % len(STAIN_COLORS)], localization="nuclear")
 
@@ -12298,9 +12344,9 @@ class LDStainDictEditor:
         if dup_markers:
             errors.append(f"Marker name used more than once: {dup_markers}")
 
-        by_name = {r["condition"]: r for r in rows}
-        live_used = by_name["LIVE"]["channel"] != _STAIN_NO_CHANNEL
-        dead_used = by_name["DEAD"]["channel"] != _STAIN_NO_CHANNEL
+        # v1.2.2: LIVE_<n> / DEAD_<n> rows count as LIVE / DEAD markers
+        live_used = any(ld_role(r["condition"]) == "LIVE" for r in used)
+        dead_used = any(ld_role(r["condition"]) == "DEAD" for r in used)
         if not (live_used or dead_used):
             errors.append("Assign a channel to LIVE and/or DEAD: the live/dead call "
                           "needs at least one of them.")
@@ -12308,6 +12354,10 @@ class LDStainDictEditor:
             notes.append("No DEAD channel: cells that are not LIVE-positive are called DEAD.")
         elif not live_used:
             notes.append("No LIVE channel: cells that are not DEAD-positive are called LIVE.")
+        else:
+            notes.append("Cells positive for no LIVE and no DEAD marker are UNCLASSIFIED "
+                         "(left out of the viability). A counterstain that should make a cell "
+                         "LIVE (e.g. Hoechst) goes in with 'Add LIVE stain'.")
         if used and not any(r["localization"] == "nuclear" for r in used):
             notes.append("No nuclear marker: each cell's nucleus is estimated as a "
                          "nucleus-sized sphere at the centre of its cell body.")
@@ -12954,6 +13004,107 @@ def ld_correct_depth(original, stain_complete_df, nuclear_conditions, conditions
     return image, profiles, conds
 
 
+def ld_binary_threshold(im_final_stack, stain_complete_df, nuclei_diameter, r_zxyz,
+                        conditions=None, nuclear_conditions=None,
+                        min_brightness=0.3, edge_brightness=0.15, min_snr=5.0):
+    """LIVE/DEAD v1.2.2, Cell 15: keep only the clearly bright signal of the
+    LIVE/DEAD stains in their threshold masks.
+
+    The threshold of Cell 15 (validated on nuclei) follows the intensity
+    gradients, so it also keeps dim objects: out-of-focus cells (in a 2D image
+    often light from another depth) and faint halos. LIVE/DEAD stains are
+    binary -- a cell is bright or it is not -- so for each condition in
+    ``conditions`` (default: every marker of the call, LIVE / LIVE_<n> /
+    DEAD / DEAD_<n>, `ld_role`; e.g. a Hoechst counterstain added as LIVE_2),
+    on its 'Denoised image' channel (linear intensity, lightly smoothed):
+
+    - background = median and noise (1.4826 x MAD) outside the mask;
+    - the *typical bright cell* = the 90th percentile of the peak intensity
+      of the mask's objects;
+    - an object is kept only if its peak is at least ``min_brightness`` x
+      (typical bright cell - background) above the background, **and**
+      ``min_snr`` x the noise above it (so a channel without real cells, e.g.
+      no dead cells, ends up empty instead of keeping its brightest noise);
+    - inside the kept objects, voxels dimmer than ``edge_brightness`` x
+      (typical bright cell - background) above the background are background.
+
+    The pieces left smaller than the small-island limit of Cell 15 are
+    removed. Every factor at 0 = that test off. The masks of
+    ``im_final_stack['Threshold image']`` are changed in place: they are what
+    the segmentation (Cells 17-18) and the positivity of the LIVE/DEAD call
+    (Cell 19) use. Returns ``im_final_stack``.
+    """
+    if not (min_brightness or edge_brightness or min_snr):
+        print("LIVE/DEAD bright-signal filter off.")
+        return im_final_stack
+    if conditions is None:
+        conditions = [c for c in stain_complete_df.index if ld_role(c)]
+    thr = im_final_stack['Threshold image']
+    den = im_final_stack['Denoised image']
+    r_zX, r_zY, r_zZ = r_zxyz
+    is_2d = thr.shape[0] == 1
+    if is_2d:
+        nucleus_vox = np.pi * (nuclei_diameter / 2.0) ** 2 / (r_zX * r_zY)
+    else:
+        nucleus_vox = _sphere_volume_um3(nuclei_diameter) / (r_zX * r_zY * r_zZ)
+    nuclear = {str(c).upper() for c in (nuclear_conditions or [])}
+    rows = []
+    for cond in conditions:
+        if cond not in stain_complete_df.index:
+            continue
+        c = stain_complete_df.index.get_loc(cond)
+        mask = thr[..., c] > 0
+        if not mask.any():
+            rows.append({"Condition": cond, "Objects kept": 0, "Objects removed": 0})
+            continue
+        sm = ndi.gaussian_filter(np.asarray(den[..., c], dtype=np.float32),
+                                 sigma=(0, 1, 1) if is_2d else 1.0)
+        outside = sm[~mask]
+        if outside.size == 0:
+            outside = sm.ravel()
+        if outside.size > 2_000_000:
+            outside = outside[::max(1, outside.size // 2_000_000)]
+        bg = float(np.median(outside))
+        noise = max(0.5, 1.4826 * float(np.median(np.abs(outside - bg))))
+        del outside
+        labels, n = ndi.label(mask)
+        peaks = np.asarray(ndi.maximum(sm, labels, index=np.arange(1, n + 1)), dtype=float)
+        ref = float(np.percentile(peaks, 90)) if n >= 3 else float(peaks.max())
+        span = max(ref - bg, 1e-6)
+        cut_obj = max(bg + float(min_brightness or 0) * span, bg + float(min_snr or 0) * noise)
+        keep = np.zeros(n + 1, dtype=bool)
+        keep[1:] = peaks >= cut_obj
+        new = keep[labels]
+        del labels
+        cut_vox = bg + float(edge_brightness or 0) * span
+        if edge_brightness:
+            new &= sm >= cut_vox
+        del sm
+        min_size = np.ceil((0.4 if str(cond).upper() in nuclear else 0.8) * nucleus_vox)
+        new = remove_small_islands(new, min_size)
+        n_vox = int(np.count_nonzero(mask))
+        thr[..., c] = new.astype(thr.dtype)
+        rows.append({
+            "Condition": cond, "Background": round(bg, 1), "Noise": round(noise, 2),
+            "Typical bright cell": round(ref, 1), "Object cutoff": round(cut_obj, 1),
+            "Voxel cutoff": round(cut_vox, 1) if edge_brightness else None,
+            "Objects kept": int(np.count_nonzero(keep[1:])),
+            "Objects removed": int(n - np.count_nonzero(keep[1:])),
+            "Mask voxels removed [%]": round(100.0 * (1 - np.count_nonzero(new) / max(n_vox, 1)), 1),
+        })
+        del mask, new
+    print(f"LIVE/DEAD bright-signal filter (objects >= {min_brightness:g} x the typical bright "
+          f"cell and >= {min_snr:g} x noise above background; voxels >= {edge_brightness:g} x):")
+    if rows:
+        _display_if_notebook(pd.DataFrame(rows).set_index("Condition"))
+        for r in rows:
+            if r.get("Objects kept") == 0 and r.get("Objects removed"):
+                print(f"  {r['Condition']}: no object stands out clearly from the background "
+                      "-- the channel has no positive cells now. Lower ld_min_brightness / "
+                      "ld_min_snr if that is wrong.")
+    return im_final_stack
+
+
 def segment_ld_nuclei(
     im_final_stack,
     stain_df,
@@ -13495,10 +13646,36 @@ def _ld_intensity_column(condition, compartment):
     return f"{condition} mean int. ({'nucleus' if compartment == 'nuclear' else 'cell'})"
 
 
+# v1.2.2: with both a LIVE and a DEAD channel, a cell positive for neither
+# marker gets no call: UNCLASSIFIED, reported but left out of the viability.
+LD_UNCLASSIFIED = "UNCLASSIFIED"
+LD_STATUSES = ("LIVE", "DEAD", LD_UNCLASSIFIED)
+
+
+def _ld_counts(ld_cells_df):
+    """Cells per status and the viability, LIVE / (LIVE + DEAD) in % (the
+    UNCLASSIFIED cells are left out; NaN when no cell is LIVE or DEAD)."""
+    counts = ld_cells_df['Status'].value_counts() if len(ld_cells_df) else {}
+    out = {s: int(counts.get(s, 0)) for s in LD_STATUSES}
+    out['total'] = int(len(ld_cells_df))
+    out['classified'] = out['LIVE'] + out['DEAD']
+    out['viability'] = (100.0 * out['LIVE'] / out['classified']) if out['classified'] else np.nan
+    return out
+
+
+def _ld_pct(value):
+    return "n/a" if value is None or not np.isfinite(value) else f"{value:.1f}%"
+
+
 def _ld_rule_text(rule, has_live, has_dead):
+    neither = (f"; positive for neither -> {LD_UNCLASSIFIED} (not in the viability)"
+               if has_live and has_dead else "")
     if rule == "coverage":
-        return ("positive for one marker only -> that one; for both or neither -> "
-                "the marker covering more of its compartment")
+        return ("positive for one marker only -> that one; for both -> "
+                "the marker covering more of its compartment" + neither)
+    if has_dead and has_live:
+        return ("positive for a DEAD marker -> DEAD, for a LIVE marker only -> LIVE"
+                + neither)
     if has_dead:
         return "DEAD-positive -> DEAD, otherwise LIVE"
     return "LIVE-positive -> LIVE, otherwise DEAD"
@@ -13530,13 +13707,18 @@ def classify_live_dead(
       calcein left). Without a DEAD channel: LIVE-positive -> LIVE,
       otherwise DEAD.
     - ``"coverage"``: positive for one of the two only -> that one; positive
-      for both or neither -> the marker covering the larger fraction of its
+      for both -> the marker covering the larger fraction of its
       compartment. Needs both channels (otherwise "dead_priority" is used).
+
+    v1.2.2: with both a LIVE and a DEAD channel, a cell positive for neither
+    marker (e.g. a nucleus of the counterstain only, or a cell whose signal
+    was too dim for the bright-signal filter) is ``UNCLASSIFIED``: reported,
+    but left out of the viability, LIVE / (LIVE + DEAD).
 
     Adds to ``im_segmentation_stack`` one label layer per condition -- the
     marker's voxels in the compartment of its positive cells, also stored as
     '<condition>_cyto' for the shared quantification -- and 'Status' (each
-    cell's voxels: 1 = LIVE, 2 = DEAD).
+    cell's voxels: 1 = LIVE, 2 = DEAD, 3 = UNCLASSIFIED).
 
     Returns
     -------
@@ -13612,7 +13794,18 @@ def classify_live_dead(
         seg[cond + '_cyto'] = layer
         del mask, layer
 
-    has_live, has_dead = 'LIVE' in positive, 'DEAD' in positive
+    # v1.2.2: the LIVE group (LIVE, LIVE_2, ... e.g. Hoechst) and the DEAD
+    # group (DEAD, DEAD_2, ...): a cell is positive for a group when it is
+    # positive for any of its markers; the group coverage is the largest one.
+    groups = {role: ld_call_conditions(list(positive), role) for role in ('LIVE', 'DEAD')}
+    group_pos, group_cov = {}, {}
+    for role, conds in groups.items():
+        if conds:
+            group_pos[role] = np.logical_or.reduce([positive[c] for c in conds])
+            group_cov[role] = np.max(np.vstack([coverage[c] for c in conds]), axis=0)
+            df[f'{role} call positive'] = group_pos[role]
+            df[f'{role} call coverage'] = group_cov[role]
+    has_live, has_dead = 'LIVE' in group_pos, 'DEAD' in group_pos
     if not (has_live or has_dead):
         raise ValueError("The stain table needs a LIVE and/or a DEAD condition.")
     rule = ld_rule
@@ -13621,28 +13814,32 @@ def classify_live_dead(
               "using 'dead_priority' instead.")
         rule = 'dead_priority'
     if rule == 'coverage':
-        live_pos, dead_pos = positive['LIVE'], positive['DEAD']
-        is_dead = np.where(live_pos != dead_pos, dead_pos, coverage['DEAD'] > coverage['LIVE'])
+        live_pos, dead_pos = group_pos['LIVE'], group_pos['DEAD']
+        is_dead = np.where(live_pos != dead_pos, dead_pos, group_cov['DEAD'] > group_cov['LIVE'])
     elif has_dead:
-        is_dead = positive['DEAD']
+        is_dead = group_pos['DEAD']
     else:
-        is_dead = ~positive['LIVE']
+        is_dead = ~group_pos['LIVE']
 
+    status = np.where(is_dead, 'DEAD', 'LIVE').astype(object)
     if has_live and has_dead:
-        live_pos, dead_pos = positive['LIVE'], positive['DEAD']
+        live_pos, dead_pos = group_pos['LIVE'], group_pos['DEAD']
         markers = np.full(n_cells, 'neither', dtype=object)
         markers[live_pos & ~dead_pos] = 'LIVE only'
         markers[dead_pos & ~live_pos] = 'DEAD only'
         markers[live_pos & dead_pos] = 'both'
+        # v1.2.2: positive for neither marker -> no call (left out of the viability)
+        status[~live_pos & ~dead_pos] = LD_UNCLASSIFIED
     elif has_dead:
-        markers = np.where(positive['DEAD'], 'DEAD+', 'DEAD-')
+        markers = np.where(group_pos['DEAD'], 'DEAD+', 'DEAD-')
     else:
-        markers = np.where(positive['LIVE'], 'LIVE+', 'LIVE-')
-    df.insert(0, 'Status', np.where(is_dead, 'DEAD', 'LIVE'))
+        markers = np.where(group_pos['LIVE'], 'LIVE+', 'LIVE-')
+    df.insert(0, 'Status', status)
     df.insert(1, 'LIVE/DEAD markers', markers)
 
+    # Status layer: 1 = LIVE, 2 = DEAD, 3 = UNCLASSIFIED
     status_lut = np.zeros(n_cells + 1, dtype=np.uint8)
-    status_lut[1:] = np.where(is_dead, 2, 1)
+    status_lut[1:] = np.select([status == 'LIVE', status == 'DEAD'], [1, 2], default=3)
     seg['Status'] = status_lut[cells]
 
     df.attrs = {
@@ -13652,12 +13849,18 @@ def classify_live_dead(
         'min_positive_fraction': float(min_positive_fraction),
         'localization': {str(c): loc.get(str(c).upper()) for c in stain_df.index},
         'markers': {str(c): str(stain_df.loc[c, 'Marker']) for c in stain_df.index},
+        'call_groups': {role: list(conds) for role, conds in groups.items() if conds},
     }
-    n_dead = int(np.count_nonzero(is_dead))
+    if any(len(v) > 1 for v in groups.values()):
+        print("LIVE/DEAD markers of the call: " + "; ".join(
+            f"{role} = {' or '.join(map(str, conds))}" for role, conds in groups.items() if conds))
+    c = _ld_counts(df)
     print(f"LIVE/DEAD call ({df.attrs['rule_text']}; positive = marker covers >= "
           f"{100 * min_positive_fraction:.0f}% of its compartment): "
-          f"{n_cells - n_dead} LIVE, {n_dead} DEAD of {n_cells} cells "
-          f"({100.0 * (n_cells - n_dead) / n_cells:.1f}% viability)")
+          f"{c['LIVE']} LIVE, {c['DEAD']} DEAD"
+          + (f", {c[LD_UNCLASSIFIED]} UNCLASSIFIED" if c[LD_UNCLASSIFIED] else "")
+          + f" of {n_cells} cells ({_ld_pct(c['viability'])} viability"
+          + (", unclassified cells left out" if c[LD_UNCLASSIFIED] else "") + ")")
     return seg, df
 
 
@@ -13707,7 +13910,10 @@ def view_ld_results(
                             blending='additive', scale=scale)
     status = im_segmentation_stack.get('Status')
     if status is not None:
-        for value, name, colormap in ((1, 'LIVE', 'green'), (2, 'DEAD', 'red')):
+        for value, name, colormap in ((1, 'LIVE', 'green'), (2, 'DEAD', 'red'),
+                                      (3, LD_UNCLASSIFIED, 'gray')):
+            if value == 3 and not np.any(status == 3):
+                continue
             viewer_1.add_image((status == value).astype(np.uint8), name=f'{name} cells (call)',
                                colormap=colormap, blending='additive', opacity=0.5,
                                contrast_limits=(0, 1), scale=scale)
@@ -13722,13 +13928,17 @@ def _ld_conditions(ld_cells_df):
 
 
 def _ld_status_table(ld_cells_df):
-    """Population table: one row per status (LIVE, DEAD) and ALL cells."""
+    """Population table: one row per status (LIVE, DEAD and, if any,
+    UNCLASSIFIED) and ALL cells."""
     loc = ld_cells_df.attrs.get('localization', {})
     size = _ld_size_names(ld_cells_df.attrs.get('is_2d', False))
     word, unit = size['word'], size['unit']
     total = len(ld_cells_df)
     rows = {}
-    for name in ('LIVE', 'DEAD', 'ALL'):
+    names = ['LIVE', 'DEAD']
+    if (ld_cells_df['Status'] == LD_UNCLASSIFIED).any():
+        names.append(LD_UNCLASSIFIED)
+    for name in names + ['ALL']:
         sub = ld_cells_df if name == 'ALL' else ld_cells_df[ld_cells_df['Status'] == name]
         n = len(sub)
         nuc = sub[size['nucleus']].dropna()
@@ -13788,11 +13998,15 @@ def print_ld_summary(ld_cells_df, stain_df):
     print(f"  (positive = marker covers >= {100 * attrs.get('min_positive_fraction', 0):.0f}% "
           "of its compartment: nucleus for nuclear, whole cell for cytoplasmic markers)")
     print(" ")
-    counts = ld_cells_df['Status'].value_counts()
-    for status in ('LIVE', 'DEAD'):
-        n = int(counts.get(status, 0))
-        print(f"  {status:<5} = {n:>6} cells  ({100.0 * n / total:.1f} %)")
-    print(f"  VIABILITY = {100.0 * counts.get('LIVE', 0) / total:.1f} %")
+    c = _ld_counts(ld_cells_df)
+    for status in LD_STATUSES:
+        n = c[status]
+        if status == LD_UNCLASSIFIED and not n:
+            continue
+        print(f"  {status:<12} = {n:>6} cells  ({100.0 * n / total:.1f} % of all cells)")
+    print(f"  VIABILITY = {_ld_pct(c['viability'])}  (LIVE / (LIVE + DEAD), "
+          f"{c['classified']} classified cells"
+          + (f"; {c[LD_UNCLASSIFIED]} unclassified left out)" if c[LD_UNCLASSIFIED] else ")"))
     print(" ")
     print("  Marker combination -> call:")
     for combo, sub in ld_cells_df.groupby('LIVE/DEAD markers', sort=False):
@@ -13808,7 +14022,7 @@ def print_ld_summary(ld_cells_df, stain_df):
               f"({n_pos} cells)  |  mean coverage = {ld_cells_df[f'{cond} coverage'].mean():.2f}")
     print("_" * 80)
 
-    for status in ('LIVE', 'DEAD'):
+    for status in LD_STATUSES:
         sub = ld_cells_df[ld_cells_df['Status'] == status]
         if sub.empty:
             continue
@@ -13828,7 +14042,16 @@ def _ld_status_colors(stain_complete_df):
             colors[status] = _condition_color(status, stain_complete_df)
         else:
             colors[status] = default
+    colors[LD_UNCLASSIFIED] = '0.6'  # grey
     return colors
+
+
+def _ld_present_statuses(ld_cells_df):
+    """LIVE, DEAD and, if any cell has it, UNCLASSIFIED."""
+    statuses = ['LIVE', 'DEAD']
+    if (ld_cells_df['Status'] == LD_UNCLASSIFIED).any():
+        statuses.append(LD_UNCLASSIFIED)
+    return statuses
 
 
 def plot_live_dead_classification(ld_cells_df, stain_complete_df, input_file=None,
@@ -13845,28 +14068,38 @@ def plot_live_dead_classification(ld_cells_df, stain_complete_df, input_file=Non
     fig, (ax_bar, ax) = plt.subplots(1, 2, figsize=(14, 5.5),
                                      gridspec_kw={'width_ratios': (1, 2.2)})
 
-    counts = ld_cells_df['Status'].value_counts()
-    statuses = ['LIVE', 'DEAD']
-    values = [int(counts.get(s, 0)) for s in statuses]
-    bars = ax_bar.bar(statuses, values, color=[colors[s] for s in statuses], edgecolor='black')
+    c = _ld_counts(ld_cells_df)
+    statuses = _ld_present_statuses(ld_cells_df)
+    values = [c[s] for s in statuses]
+    bars = ax_bar.bar(['UNCLASS.' if s == LD_UNCLASSIFIED else s for s in statuses], values,
+                      color=[colors[s] for s in statuses], edgecolor='black')
     for bar, value in zip(bars, values):
         pct = 100.0 * value / total if total else 0.0
         ax_bar.annotate(f"{value}\n({pct:.1f} %)", (bar.get_x() + bar.get_width() / 2, value),
                         ha='center', va='bottom', fontsize=10)
     ax_bar.set_ylabel("Cells")
     ax_bar.set_ylim(0, max(values + [1]) * 1.25)
-    ax_bar.set_title(f"LIVE/DEAD call ({total} cells)")
+    ax_bar.set_title(f"LIVE/DEAD call ({total} cells, viability {_ld_pct(c['viability'])})")
 
-    has = [c for c in ('LIVE', 'DEAD') if f'{c} coverage' in ld_cells_df.columns]
+    # v1.2.2: coverage of the call groups (LIVE + LIVE_2 ..., DEAD + DEAD_2 ...:
+    # the largest of their markers); older tables only have 'LIVE coverage'.
+    def _cov_col(c):
+        return f'{c} call coverage' if f'{c} call coverage' in ld_cells_df.columns else f'{c} coverage'
+    groups = ld_cells_df.attrs.get('call_groups', {})
+
+    def _cov_label(c):
+        names = groups.get(c) or [c]
+        return f"{' / '.join(map(str, names))} coverage" + (" (largest)" if len(names) > 1 else "")
+    has = [c for c in ('LIVE', 'DEAD') if _cov_col(c) in ld_cells_df.columns]
     if len(has) == 2:
         for status in statuses:
             sub = ld_cells_df[ld_cells_df['Status'] == status]
-            ax.scatter(sub['LIVE coverage'], sub['DEAD coverage'], s=12, alpha=0.6,
+            ax.scatter(sub[_cov_col('LIVE')], sub[_cov_col('DEAD')], s=12, alpha=0.6,
                        color=colors[status], edgecolors='none', label=f"{status} ({len(sub)})")
         ax.axvline(thr, color='0.3', linestyle='--', linewidth=1.2)
         ax.axhline(thr, color='0.3', linestyle='--', linewidth=1.2)
-        ax.set_xlabel("LIVE coverage (fraction of compartment)")
-        ax.set_ylabel("DEAD coverage (fraction of compartment)")
+        ax.set_xlabel(f"{_cov_label('LIVE')} (fraction of compartment)")
+        ax.set_ylabel(f"{_cov_label('DEAD')} (fraction of compartment)")
         ax.set_xlim(-0.02, 1.02)
         ax.set_ylim(-0.02, 1.02)
     elif has:
@@ -13874,10 +14107,10 @@ def plot_live_dead_classification(ld_cells_df, stain_complete_df, input_file=Non
         bins = np.linspace(0, 1, 41)
         for status in statuses:
             sub = ld_cells_df[ld_cells_df['Status'] == status]
-            ax.hist(sub[f'{cond} coverage'], bins=bins, color=colors[status], alpha=0.6,
+            ax.hist(sub[_cov_col(cond)], bins=bins, color=colors[status], alpha=0.6,
                     label=f"{status} ({len(sub)})")
         ax.axvline(thr, color='0.3', linestyle='--', linewidth=1.2)
-        ax.set_xlabel(f"{cond} coverage (fraction of compartment)")
+        ax.set_xlabel(f"{_cov_label(cond)} (fraction of compartment)")
         ax.set_ylabel("Cells")
     ax.set_title(f"Per-cell coverage -- positive >= {thr:.2f} (dashed)")
     ax.grid(alpha=0.2)
@@ -13893,11 +14126,12 @@ def plot_live_dead_classification(ld_cells_df, stain_complete_df, input_file=Non
 
 
 def plot_ld_spatial_distributions(ld_cells_df, stain_complete_df, volume_shape, r_zxyz, bins=30):
-    """LD Cell 25: where the LIVE and DEAD cells are along X, Y and Z (number of
-    cells, left axis) and the viability along each direction (% LIVE, dashed,
-    right axis) -- e.g. viability vs depth in a 3D construct. A 2D image has
-    only X and Y."""
+    """LD Cell 25: where the LIVE and DEAD (and UNCLASSIFIED) cells are along
+    X, Y and Z (number of cells, left axis) and the viability along each
+    direction (LIVE / (LIVE + DEAD) in %, dashed, right axis) -- e.g.
+    viability vs depth in a 3D construct. A 2D image has only X and Y."""
     colors = _ld_status_colors(stain_complete_df)
+    statuses = _ld_present_statuses(ld_cells_df)
     r_zX, r_zY, r_zZ = r_zxyz
     extents = {'X': volume_shape[2] * r_zX, 'Y': volume_shape[1] * r_zY, 'Z': volume_shape[0] * r_zZ}
     axis_names = 'XYZ' if 'Z [um]' in ld_cells_df.columns else 'XY'
@@ -13906,16 +14140,17 @@ def plot_ld_spatial_distributions(ld_cells_df, stain_complete_df, volume_shape, 
         edges = np.linspace(0, extents[axis_name], bins + 1)
         centers = (edges[:-1] + edges[1:]) / 2
         counts = {}
-        for status in ('LIVE', 'DEAD'):
+        for status in statuses:
             values = ld_cells_df.loc[ld_cells_df['Status'] == status, f'{axis_name} [um]']
             counts[status], _ = np.histogram(values, bins=edges)
-            ax.plot(centers, counts[status], color=colors[status], label=f'{status} cells')
-        total = counts['LIVE'] + counts['DEAD']
+            ax.plot(centers, counts[status], color=colors[status], label=f'{status} cells',
+                    linestyle=':' if status == LD_UNCLASSIFIED else '-')
+        total = counts['LIVE'] + counts['DEAD']  # unclassified cells left out
         with np.errstate(invalid='ignore', divide='ignore'):
             viability = np.where(total > 0, 100.0 * counts['LIVE'] / total, np.nan)
         tax = ax.twinx()
         tax.plot(centers, viability, color='white', linestyle='--', marker='o', markersize=3,
-                 label='Viability (% LIVE)')
+                 label='Viability (LIVE / (LIVE + DEAD))')
         tax.set_ylim(0, 105)
         tax.set_ylabel("Viability [%]")
         ax.set_title(f"LIVE/DEAD {axis_name} DISTRIBUTION")
@@ -13942,7 +14177,7 @@ def plot_ld_size_distributions(ld_cells_df, stain_complete_df, bins=30):
             ax.text(0.5, 0.5, "no data", ha='center', va='center', transform=ax.transAxes)
         else:
             edges = np.linspace(0, float(values.max()), bins + 1)
-            for status in ('LIVE', 'DEAD'):
+            for status in _ld_present_statuses(ld_cells_df):
                 sub = ld_cells_df.loc[ld_cells_df['Status'] == status, col].dropna()
                 if len(sub):
                     ax.hist(sub, bins=edges, color=colors[status], alpha=0.5,
@@ -13978,16 +14213,19 @@ def export_live_dead_to_excel(input_file, original_stain_complete_df, ld_cells_d
 
     attrs = ld_cells_df.attrs
     total = len(ld_cells_df)
-    counts = ld_cells_df['Status'].value_counts()
-    n_live, n_dead = int(counts.get('LIVE', 0)), int(counts.get('DEAD', 0))
+    c = _ld_counts(ld_cells_df)
+    n_live, n_dead, n_unc = c['LIVE'], c['DEAD'], c[LD_UNCLASSIFIED]
     summary_rows = [
         ('Image', '2D (sizes are areas, um2)' if attrs.get('is_2d') else '3D (sizes are volumes, um3)'),
         ('Total cells', total),
         ('LIVE cells', n_live),
         ('DEAD cells', n_dead),
-        ('LIVE [%]', round(100.0 * n_live / total, 2) if total else ''),
-        ('DEAD [%]', round(100.0 * n_dead / total, 2) if total else ''),
-        ('Viability [%]', round(100.0 * n_live / total, 2) if total else ''),
+        ('UNCLASSIFIED cells (positive for neither)', n_unc),
+        ('LIVE [% of all cells]', round(100.0 * n_live / total, 2) if total else ''),
+        ('DEAD [% of all cells]', round(100.0 * n_dead / total, 2) if total else ''),
+        ('UNCLASSIFIED [% of all cells]', round(100.0 * n_unc / total, 2) if total else ''),
+        ('Viability [%] = LIVE / (LIVE + DEAD)',
+         round(c['viability'], 2) if np.isfinite(c['viability']) else ''),
         ('Cells with a stained nucleus', int((ld_cells_df['Nucleus'] == 'stained').sum())),
         ('Cells with an estimated nucleus', int((ld_cells_df['Nucleus'] == 'estimated').sum())),
         ('Call rule', attrs.get('rule_text', '')),
@@ -14009,6 +14247,7 @@ def export_live_dead_to_excel(input_file, original_stain_complete_df, ld_cells_d
         title_fmt = wb.add_format({'bold': True, 'font_size': 12})
         live_fmt = wb.add_format({'bg_color': '#C6EFCE'})
         dead_fmt = wb.add_format({'bg_color': '#FFC7CE'})
+        unc_fmt = wb.add_format({'bg_color': '#D9D9D9'})
 
         summary_df.to_excel(writer, sheet_name='Summary', index=False, startrow=1)
         start = len(summary_df) + 4
@@ -14026,7 +14265,7 @@ def export_live_dead_to_excel(input_file, original_stain_complete_df, ld_cells_d
         ws.freeze_panes(1, 1)
         if total:
             col = cells_out.columns.get_loc('Status')
-            for value, fmt in (('LIVE', live_fmt), ('DEAD', dead_fmt)):
+            for value, fmt in (('LIVE', live_fmt), ('DEAD', dead_fmt), (LD_UNCLASSIFIED, unc_fmt)):
                 ws.conditional_format(1, col, total, col, {
                     'type': 'cell', 'criteria': '==', 'value': f'"{value}"', 'format': fmt,
                 })
@@ -14111,6 +14350,9 @@ def _process_single_image_ld_batch(
     min_piece_fraction=0.2,
     nuclei_split_config=None,
     nuclei_options=None,
+    ld_min_brightness=0.0,
+    ld_edge_brightness=0.0,
+    ld_min_snr=0.0,
 ):
     """Run the LIVE/DEAD notebook (Cells 4-33) on one file, without viewers,
     inline plots or PNG subfolders, writing every output file into
@@ -14225,6 +14467,10 @@ def _process_single_image_ld_batch(
         nuclear_conditions=nuclear_conditions,
         progress=progress,
     )
+    im_final_stack = ld_binary_threshold(  # v1.2.2: clearly bright LIVE/DEAD signal only
+        im_final_stack, stain_complete_df, nuclei_diameter, (r_zX, r_zY, r_zZ),
+        nuclear_conditions=nuclear_conditions, min_brightness=ld_min_brightness,
+        edge_brightness=ld_edge_brightness, min_snr=ld_min_snr)
 
     # Cell 16
     ld_params = _ld_parameters(
@@ -14237,6 +14483,9 @@ def _process_single_image_ld_batch(
     ld_params['Split gamma step'] = split_gamma_step
     ld_params['Min split piece fraction'] = min_piece_fraction
     ld_params['Scale factor'] = scale_factor
+    ld_params['LD min brightness'] = ld_min_brightness
+    ld_params['LD edge brightness'] = ld_edge_brightness
+    ld_params['LD min SNR'] = ld_min_snr
     if nuclei_split_config is not None:
         ld_params['Watershed split config'] = str(nuclei_split_config)
     ld_params.update({f"Nuclei option {k}": (str(v) if isinstance(v, (list, dict)) else v)
@@ -14403,14 +14652,15 @@ def _process_single_image_ld_batch(
             output_dir=output_dir,
         )
 
-    counts = ld_cells_df['Status'].value_counts()
-    n_cells = len(ld_cells_df)
+    c = _ld_counts(ld_cells_df)
     return {
         'Image': '2D' if is_2d else '3D',
-        'Cells': n_cells,
-        'LIVE': int(counts.get('LIVE', 0)),
-        'DEAD': int(counts.get('DEAD', 0)),
-        'Viability [%]': round(100.0 * counts.get('LIVE', 0) / n_cells, 2) if n_cells else np.nan,
+        'Cells': c['total'],
+        'LIVE': c['LIVE'],
+        'DEAD': c['DEAD'],
+        'UNCLASSIFIED': c[LD_UNCLASSIFIED],
+        # LIVE / (LIVE + DEAD): the unclassified cells are left out
+        'Viability [%]': round(c['viability'], 2) if np.isfinite(c['viability']) else np.nan,
     }
 
 
@@ -14454,6 +14704,9 @@ def run_ld_batch_folder(
     min_piece_fraction=0.2,
     nuclei_split_config=None,
     nuclei_options=None,
+    ld_min_brightness=0.0,
+    ld_edge_brightness=0.0,
+    ld_min_snr=0.0,
 ):
     """Process every supported image file in *input_folder* with the full
     LIVE/DEAD pipeline and write each image's outputs into its own
@@ -14466,6 +14719,9 @@ def run_ld_batch_folder(
     `_process_single_image_ld_batch`) carry the validated settings of the
     nuclei notebook v1.6.4 (`helpers.optimal_settings_ld.ld_batch_settings`);
     every image gets its own nuclear-marker contrast and size adaptation.
+    ``ld_min_brightness``, ``ld_edge_brightness``, ``ld_min_snr``: the
+    bright-signal filter of the LIVE/DEAD masks (`ld_binary_threshold`;
+    default 0 = off).
 
     Returns
     -------
@@ -14498,7 +14754,7 @@ def run_ld_batch_folder(
         print("=" * 80)
         image_output_dir = output_dir / _image_stem(image_path)
         row = {'File': image_path.name, 'Status': 'OK', 'Image': '', 'Cells': np.nan, 'LIVE': np.nan,
-               'DEAD': np.nan, 'Viability [%]': np.nan,
+               'DEAD': np.nan, 'UNCLASSIFIED': np.nan, 'Viability [%]': np.nan,
                'Output folder': str(image_output_dir), 'Error': ''}
         try:
             image_output_dir.mkdir(parents=True, exist_ok=True)
@@ -14527,6 +14783,9 @@ def run_ld_batch_folder(
                 min_piece_fraction=min_piece_fraction,
                 nuclei_split_config=nuclei_split_config,
                 nuclei_options=nuclei_options,
+                ld_min_brightness=ld_min_brightness,
+                ld_edge_brightness=ld_edge_brightness,
+                ld_min_snr=ld_min_snr,
                 iterative_split=iterative_split,
                 oversize_factor=oversize_factor,
                 max_split_iterations=max_split_iterations,
