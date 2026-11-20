@@ -41,15 +41,25 @@ LD_OVERRIDES = {"nuclei_rescue_contrast": 0.0}
 
 def load_ld_settings(custom_settings=None, verbose=True):
     """The validated settings (``optimal_settings_v1.6.4.json``) with the
-    LIVE/DEAD changes of ``LD_OVERRIDES``, then ``custom_settings`` on top."""
+    LIVE/DEAD changes of ``LD_OVERRIDES``, then ``custom_settings`` on top.
+
+    A ``scale_factor`` given in ``custom_settings`` is used as given
+    (``opt['scale_factor_fixed']``): the adaptation to the image (Cell 8,
+    batch mode) still measures the nucleus but no longer changes the
+    resolution. Without it the resolution is adapted as before, so that a
+    nucleus spans 12-19 voxels."""
     custom = dict(custom_settings or {})
     opt = load_optimal_settings({**LD_OVERRIDES, **custom}, verbose=verbose)
+    opt["scale_factor_fixed"] = "scale_factor" in custom
     if verbose:
         changed = {k: v for k, v in LD_OVERRIDES.items() if k not in custom}
         if changed:
             print("LIVE/DEAD: " + ", ".join(f"{k} = {v!r}" for k, v in changed.items())
                   + " (rescue of missed nuclei off: positivity is read from the "
                   "threshold masks).")
+        if opt["scale_factor_fixed"]:
+            print(f"scale_factor = {opt['scale_factor']:g} from custom_settings: used as given "
+                  "(not adapted to the image).")
     return opt
 
 
@@ -78,14 +88,18 @@ def adapt_to_image(im_original, stain_complete_df, voxel_size_zyx, nuclei_diamet
     (``opt['auto_adapt_settings']``). Updates ``opt`` in place. Returns
     ``(nuclei_diameter, zooms, changes)``."""
     changes = []
+    fixed_scale = bool(opt.get("scale_factor_fixed"))
     if not opt["auto_adapt_settings"]:
         print("Settings not adapted to the image (auto_adapt_settings = False).")
     elif is_2d:
         # The nucleus can't be measured in 2D; only the resolution is adapted,
         # to the given nuclei_diameter.
-        from helpers.notebook_helpers import adapt_scale_2d
-        opt["scale_factor"], changes = adapt_scale_2d(
-            nuclei_diameter, opt["scale_factor"], voxel_size_zyx[-1])
+        if fixed_scale:
+            print(f"2D image: scale_factor {opt['scale_factor']:g} from custom_settings kept.")
+        else:
+            from helpers.notebook_helpers import adapt_scale_2d
+            opt["scale_factor"], changes = adapt_scale_2d(
+                nuclei_diameter, opt["scale_factor"], voxel_size_zyx[-1])
     elif not nuclear_conditions:
         print("No nuclear marker: settings not adapted to the image.")
     else:
@@ -94,7 +108,12 @@ def adapt_to_image(im_original, stain_complete_df, voxel_size_zyx, nuclei_diamet
             im_original, stain_complete_df, tuple(voxel_size_zyx), nuclear_conditions,
             {"nuclei_diameter": nuclei_diameter, "scale_factor": opt["scale_factor"],
              "z_bg_radius_um": opt["z_bg_radius_um"],
-             "nuclei_edge_margin_um": opt["nuclei_edge_margin_um"]})
+             "nuclei_edge_margin_um": opt["nuclei_edge_margin_um"]},
+            adapt_scale=not fixed_scale)
+        if fixed_scale:
+            print(f"scale_factor {opt['scale_factor']:g} from custom_settings kept (a nucleus "
+                  f"spans {adapted['nuclei_diameter'] * opt['scale_factor'] / voxel_size_zyx[-1]:.1f} "
+                  "voxels; the validated settings were tuned at 12-19).")
         nuclei_diameter = adapted["nuclei_diameter"]
         for k in ("scale_factor", "z_bg_radius_um", "nuclei_edge_margin_um"):
             opt[k] = adapted[k]
@@ -149,6 +168,7 @@ def ld_batch_settings(opt):
     options = {k: opt[k] for k in _BATCH_OPTION_KEYS}
     options["z_atten_model"] = opt["z_atten_model"] if opt["z_atten_correction"] else "off"
     options["auto_adapt"] = opt["auto_adapt_settings"]
+    options["adapt_scale"] = not opt.get("scale_factor_fixed", False)
     return {"scale_factor": opt["scale_factor"], "zoom_factors": opt["zoom_factors"],
             "nuclei_split_config": opt["nuclei_split_config"],
             **{k: opt[k] for k in _SHARED_SEGMENT_KEYS},
