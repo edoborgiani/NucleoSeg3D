@@ -31,6 +31,8 @@ __all__ = [
     "build_full_labels_df",
     "build_full_labels_dict",
     "build_histogram_report",
+    "complete_skipped_steps",
+    "reset_processing_steps",
     "build_labels_df",
     "build_labels_dict",
     "collect_histogram_data",
@@ -2159,11 +2161,22 @@ def compute_nuclei_cytoplasm_stats(seg_stack, r_xyz, zooms, progress=None):
     nucleus_sizes = []
     cytoplasm_positions = []
     cytoplasm_sizes = []
+    # Each label in its bounding box (one whole-image pass per label before):
+    # the same voxels in the same order, so the same values.
+    nuclei_img, cyto_img = seg_stack["Nuclei"], seg_stack["Cytoplasm"]
+    nuc_slices = _union_label_slices([nuclei_img], max_label)
+    cyto_slices = _union_label_slices([cyto_img], max_label)
+
+    def _where_label(img, sl, label_id):
+        if sl is None:
+            return (np.empty(0, dtype=np.intp),) * 3
+        idx = np.where(img[sl] == label_id)
+        return tuple(i + s.start for i, s in zip(idx, sl))
 
     for label_id in _progress_iter(
         range(1, max_label + 1), progress, desc="Quantify Nuclei/Cytoplasm per cell", leave=False
     ):
-        z_nuc, y_nuc, x_nuc = np.where(seg_stack["Nuclei"] == label_id)
+        z_nuc, y_nuc, x_nuc = _where_label(nuclei_img, nuc_slices[label_id - 1], label_id)
         if x_nuc.size == 0:
             nucleus_positions.append((0.0, 0.0, 0.0))
             nucleus_sizes.append(0.0)
@@ -2177,7 +2190,7 @@ def compute_nuclei_cytoplasm_stats(seg_stack, r_xyz, zooms, progress=None):
             )
             nucleus_sizes.append(float(x_nuc.size * r_xyz[0] * r_xyz[1] * r_xyz[2]))
 
-        z_cyto, y_cyto, x_cyto = np.where(seg_stack["Cytoplasm"] == label_id)
+        z_cyto, y_cyto, x_cyto = _where_label(cyto_img, cyto_slices[label_id - 1], label_id)
         if x_cyto.size == 0:
             cytoplasm_positions.append((0.0, 0.0, 0.0))
             cytoplasm_sizes.append(0.0)
@@ -2244,22 +2257,31 @@ def _compute_marker_stats_core(
     std_pcm_marker = []
 
     max_label = _n_cells(seg_stack)
+    # Each cell in the bounding box of its nucleus, cytoplasm and PCM (one
+    # whole-image pass per cell before): the same voxels in the same order,
+    # so the same values.
+    cell_slices = _union_label_slices(
+        [seg_stack["Nuclei"], seg_stack["Cytoplasm"], seg_stack["PCM"]], max_label)
     for label_id in _progress_iter(
         range(1, max_label + 1), progress,
         desc=progress_desc or f"Quantify [{condition}] per cell", leave=False,
     ):
-        nucleus_mask = seg_stack["Nuclei"] == label_id
-        cytoplasm_mask = seg_stack["Cytoplasm"] == label_id
-        pcm_mask = seg_stack["PCM"] == label_id
-        marker_mask = (marker_img > 0) & ((nucleus_mask + cytoplasm_mask + pcm_mask) > 0)
+        sl = cell_slices[label_id - 1]
+        if sl is None:
+            continue
+        nucleus_mask = seg_stack["Nuclei"][sl] == label_id
+        cytoplasm_mask = seg_stack["Cytoplasm"][sl] == label_id
+        pcm_mask = seg_stack["PCM"][sl] == label_id
+        marker_mask = (marker_img[sl] > 0) & ((nucleus_mask + cytoplasm_mask + pcm_mask) > 0)
         if not np.any(marker_mask):
             continue
+        filtered_c = filtered_img[sl]
 
         shared_labels.append(label_id)
         voxels = np.where(marker_mask)
         marker_sizes.append(voxels[0].size * r_xyz[0] * r_xyz[1] * r_xyz[2])
         if channel_idx is not None:
-            values = filtered_img[voxels[0], voxels[1], voxels[2], channel_idx]
+            values = filtered_c[voxels[0], voxels[1], voxels[2], channel_idx]
             avg_marker.append(float(np.mean(values)) if values.size > 0 else 0.0)
             std_marker.append(float(np.std(values)) if values.size > 0 else 0.0)
         else:
@@ -2267,16 +2289,16 @@ def _compute_marker_stats_core(
             std_marker.append(0.0)
 
         if marker_img_cyto is not None:
-            cytoplasm_marker_mask = (marker_img_cyto > 0) & cytoplasm_mask
+            cytoplasm_marker_mask = (marker_img_cyto[sl] > 0) & cytoplasm_mask
         elif fallback_to_marker_when_missing:
-            cytoplasm_marker_mask = (marker_img > 0) & cytoplasm_mask
+            cytoplasm_marker_mask = (marker_img[sl] > 0) & cytoplasm_mask
         else:
             cytoplasm_marker_mask = None
         if cytoplasm_marker_mask is not None:
             voxels_cyto = np.where(cytoplasm_marker_mask)
             marker_cyto_sizes.append(voxels_cyto[0].size * r_xyz[0] * r_xyz[1] * r_xyz[2])
             if channel_idx is not None and voxels_cyto[0].size > 0:
-                values_cyto = filtered_img[voxels_cyto[0], voxels_cyto[1], voxels_cyto[2], channel_idx]
+                values_cyto = filtered_c[voxels_cyto[0], voxels_cyto[1], voxels_cyto[2], channel_idx]
                 avg_cyto_marker.append(float(np.mean(values_cyto)))
                 std_cyto_marker.append(float(np.std(values_cyto)))
             else:
@@ -2288,16 +2310,16 @@ def _compute_marker_stats_core(
             std_cyto_marker.append(0.0)
 
         if marker_img_pcm is not None:
-            pcm_marker_mask = (marker_img_pcm > 0) & pcm_mask
+            pcm_marker_mask = (marker_img_pcm[sl] > 0) & pcm_mask
         elif fallback_to_marker_when_missing:
-            pcm_marker_mask = (marker_img > 0) & pcm_mask
+            pcm_marker_mask = (marker_img[sl] > 0) & pcm_mask
         else:
             pcm_marker_mask = None
         if pcm_marker_mask is not None:
             voxels_pcm = np.where(pcm_marker_mask)
             marker_pcm_sizes.append(voxels_pcm[0].size * r_xyz[0] * r_xyz[1] * r_xyz[2])
             if channel_idx is not None and voxels_pcm[0].size > 0:
-                values_pcm = filtered_img[voxels_pcm[0], voxels_pcm[1], voxels_pcm[2], channel_idx]
+                values_pcm = filtered_c[voxels_pcm[0], voxels_pcm[1], voxels_pcm[2], channel_idx]
                 avg_pcm_marker.append(float(np.mean(values_pcm)))
                 std_pcm_marker.append(float(np.std(values_pcm)))
             else:
@@ -2915,6 +2937,11 @@ def export_channel_histograms(
         for name, arr in im_final_stack.items()
         if isinstance(arr, np.ndarray) and arr.ndim == 4 and name not in _skip_stages
     ]
+    # Skipped processing steps (Cells 9-14) only hold their input again: no sheet.
+    steps_run = im_final_stack.get(_STEPS_RUN_KEY)
+    if steps_run is not None:
+        stages = [(name, arr) for name, arr in stages
+                  if name not in _STAGE_NAMES or name in steps_run]
 
     n_channels = stain_complete_df.shape[0]
 
@@ -3596,6 +3623,7 @@ def collect_histogram_data(im_segmentation_stack, filtered_img, stain_df, stain_
     """
     hist_data = {}
     intensity_ranges = {}
+    cell_slices = None
 
     for c in _progress_iter(range(filtered_img.shape[3]), progress, desc="Step 26A - Collect Histogram Data"):
         seg_key = stain_df.index[c]
@@ -3610,19 +3638,26 @@ def collect_histogram_data(im_segmentation_stack, filtered_img, stain_df, stain_
         intensity_img = filtered_img[:, :, :, c]
         intensity_ranges[condition] = (float(intensity_img.min()), float(intensity_img.max()))
         max_n = _n_cells(im_segmentation_stack)
+        if cell_slices is None:  # each cell in its bounding box (same values)
+            cell_slices = _union_label_slices(
+                [im_segmentation_stack["Nuclei"], im_segmentation_stack["Cytoplasm"],
+                 im_segmentation_stack["PCM"]], max_n)
 
         for nucleus_id in _progress_iter(range(1, max_n + 1), progress, desc=f"Step 26B - {condition} Nuclei"):
             hist_data.setdefault(nucleus_id, {})
             hist_data[nucleus_id].setdefault(condition, [])
+            sl = cell_slices[nucleus_id - 1]
+            if sl is None:
+                continue
 
-            nuc_mask  = im_segmentation_stack["Nuclei"]    == nucleus_id
-            cyto_mask = im_segmentation_stack["Cytoplasm"] == nucleus_id
-            pcm_mask  = im_segmentation_stack["PCM"]       == nucleus_id
+            nuc_mask  = im_segmentation_stack["Nuclei"][sl]    == nucleus_id
+            cyto_mask = im_segmentation_stack["Cytoplasm"][sl] == nucleus_id
+            pcm_mask  = im_segmentation_stack["PCM"][sl]       == nucleus_id
             cell_mask = (nuc_mask | cyto_mask | pcm_mask)
-            mask_marker = (assigned > 0) & cell_mask
+            mask_marker = (assigned[sl] > 0) & cell_mask
 
             if np.any(mask_marker):
-                values = intensity_img[mask_marker]
+                values = intensity_img[sl][mask_marker]
                 if values.size > 0:
                     hist_data[nucleus_id][condition].extend(values.tolist())
 
@@ -3873,22 +3908,29 @@ def compute_percell_marker_intensity_df(
     mean_data = {condition: np.full(max_label, np.nan) for condition in conditions}
     std_data = {condition: np.full(max_label, np.nan) for condition in conditions}
 
+    # Each cell in its bounding box (one whole-image pass per cell before):
+    # the same voxels in the same order, so the same values.
+    cell_slices = _union_label_slices([nuclei_img, cyto_img, pcm_img], max_label)
     for label_id in _progress_iter(
         range(1, max_label + 1), progress, desc="Step Q1 - Per-Cell Marker Intensity"
     ):
-        cell_mask = nuclei_img == label_id
+        sl = cell_slices[label_id - 1]
+        if sl is None:
+            continue
+        cell_mask = nuclei_img[sl] == label_id
         if cyto_img is not None:
-            cell_mask = cell_mask | (cyto_img == label_id)
+            cell_mask = cell_mask | (cyto_img[sl] == label_id)
         if pcm_img is not None:
-            cell_mask = cell_mask | (pcm_img == label_id)
+            cell_mask = cell_mask | (pcm_img[sl] == label_id)
         if not np.any(cell_mask):
             continue
+        filtered_c = filtered_img[sl]
 
         for condition in conditions:
             c = channel_idx.get(condition)
             if c is None:
                 continue
-            values = filtered_img[:, :, :, c][cell_mask]
+            values = filtered_c[:, :, :, c][cell_mask]
             if values.size:
                 mean_data[condition][label_id - 1] = float(np.mean(values))
                 std_data[condition][label_id - 1] = float(np.std(values))
@@ -4961,9 +5003,15 @@ def _split_z_topology(label_img, min_fragment_vox, min_z_overlap=2):
     current_labels = current_labels[current_labels > 0]
     next_label = int(out.max()) + 1
     total_splits = 0
+    # Each label in its bounding box: same result as on the whole image.
+    slices = ndi.find_objects(out) if current_labels.size else []
 
     for label_id in current_labels:
-        label_mask = out == label_id
+        sl = slices[int(label_id) - 1]
+        if sl is None:
+            continue
+        out_c = out[sl]  # view: writes go to out
+        label_mask = out_c == label_id
         z_slices = np.where(np.any(label_mask, axis=(1, 2)))[0]
         if len(z_slices) <= 1:
             continue
@@ -5037,7 +5085,7 @@ def _split_z_topology(label_img, min_fragment_vox, min_z_overlap=2):
             next_label += 1
             total_splits += 1
             for z, c in members:
-                out[z][slice_components[z] == c] = new_label
+                out_c[z][slice_components[z] == c] = new_label
 
     return out, total_splits
 
@@ -5056,9 +5104,17 @@ def _split_z_watershed(label_img, min_fragment_vox):
         current_labels = np.unique(out)
         current_labels = current_labels[current_labels > 0]
         pass_splits = 0
+        # Each label in its bounding box (+1 voxel for the distance
+        # transform): same result as on the whole image. A label only loses
+        # voxels during the pass, so its box stays valid.
+        slices = ndi.find_objects(out) if current_labels.size else []
 
         for label_id in current_labels:
-            label_mask = out == label_id
+            sl = slices[int(label_id) - 1]
+            if sl is None:
+                continue
+            out_c = out[_padded_slice(sl, out.shape, 1)]  # view: writes go to out
+            label_mask = out_c == label_id
             z_slices = np.where(np.any(label_mask, axis=(1, 2)))[0]
             if len(z_slices) <= 1:
                 continue
@@ -5104,7 +5160,7 @@ def _split_z_watershed(label_img, min_fragment_vox):
                     continue
                 if ws_sizes[sid] < min_fragment_vox:
                     continue
-                out[sub_labels == sid] = next_label
+                out_c[sub_labels == sid] = next_label
                 next_label += 1
                 pass_splits += 1
 
@@ -5161,9 +5217,13 @@ def _merge_labels_by_z_consistency(label_img):
                 pairs.add((int(code // max_l), int(code % max_l)))
         return pairs
 
-    def _is_z_consistent_pair(labels, a, b):
-        mask_a = labels == a
-        mask_b = labels == b
+    def _is_z_consistent_pair(labels, a, b, slices):
+        # Only the bounding box of the two labels (same result as the whole image).
+        sa, sb = slices[a - 1], slices[b - 1]
+        sl = tuple(slice(min(x.start, y.start), max(x.stop, y.stop)) for x, y in zip(sa, sb))
+        crop = labels[sl]
+        mask_a = crop == a
+        mask_b = crop == b
         zs_a = set(np.where(np.any(mask_a, axis=(1, 2)))[0])
         zs_b = set(np.where(np.any(mask_b, axis=(1, 2)))[0])
         for z in zs_a | zs_b:
@@ -5192,10 +5252,11 @@ def _merge_labels_by_z_consistency(label_img):
                 uf_parent[ry] = rx
 
         pass_merges = 0
+        slices = ndi.find_objects(out)  # out is not changed until the end of the pass
         for a, b in pairs:
             if _find(a) == _find(b):
                 continue
-            if _is_z_consistent_pair(out, a, b):
+            if _is_z_consistent_pair(out, a, b, slices):
                 _union(a, b)
                 pass_merges += 1
 
@@ -5219,6 +5280,45 @@ def _merge_labels_by_z_consistency(label_img):
         total_merges += pass_merges
 
     return out, total_merges
+
+
+def _padded_slice(sl, shape, pad):
+    """Bounding box *sl* (from `ndi.find_objects`) grown by *pad* voxels on
+    every side, clipped to the image *shape*.
+
+    Speed: the per-label steps work on this crop
+    instead of the whole image, so their cost follows the label's size, not
+    the image's (with many cells, a whole-image pass per label made them
+    grow as cells x voxels). The padding gives every filter the same
+    neighbourhood it has in the whole image, so the results are unchanged:
+    1 voxel for the distance transform, erosion, contours and connected
+    components; the filter radius for a Gaussian; ``min_distance`` for a
+    peak search.
+    """
+    return tuple(slice(max(0, s.start - pad), min(n, s.stop + pad))
+                 for s, n in zip(sl, shape))
+
+
+def _gaussian_radius(sigma):
+    """Radius (voxels) of `scipy.ndimage.gaussian_filter` /
+    `gaussian_gradient_magnitude` with the default ``truncate=4.0``."""
+    return int(4.0 * float(sigma) + 0.5)
+
+
+def _union_label_slices(label_images, n_labels):
+    """For labels 1..*n_labels*: the bounding box covering the label in all
+    *label_images* (None where it is in none of them)."""
+    per_image = [ndi.find_objects(np.asarray(img), max_label=n_labels)
+                 for img in label_images if img is not None]
+    out = []
+    for i in range(n_labels):
+        boxes = [s[i] for s in per_image if i < len(s) and s[i] is not None]
+        if not boxes:
+            out.append(None)
+            continue
+        out.append(tuple(slice(min(b[d].start for b in boxes), max(b[d].stop for b in boxes))
+                         for d in range(len(boxes[0]))))
+    return out
 
 
 def _label_roundness_xy(mask):
@@ -5276,9 +5376,13 @@ def _filter_labels_by_roundness_xy(label_img, min_roundness, protect_min_vox=Non
     max_label = int(np.max(out))
     removed = 0
     protected = 0
+    slices = ndi.find_objects(out) if max_label > 0 else []
 
     for label_id in range(1, max_label + 1):
-        mask = out == label_id
+        if slices[label_id - 1] is None:
+            continue
+        crop = out[_padded_slice(slices[label_id - 1], out.shape, 1)]  # view
+        mask = crop == label_id
         voxel_count = int(np.count_nonzero(mask))
         if voxel_count == 0:
             continue
@@ -5290,7 +5394,7 @@ def _filter_labels_by_roundness_xy(label_img, min_roundness, protect_min_vox=Non
             protected += 1
             continue
 
-        out[mask] = 0
+        crop[mask] = 0
         removed += 1
 
     return out, removed, protected
@@ -5389,15 +5493,28 @@ def _split_nonround_clusters_by_intensity_peaks(
     absolute_min_piece_vox = 0.1 * expected_nucleus_vox
     piece_roundness_floor = max(0.0, min_roundness * 0.8)
 
+    # Each candidate is handled in its bounding box, padded by the smoothing
+    # radius and the peak search distance (+1): the same result as on the
+    # whole image. Labels too small to be a cluster are skipped without
+    # building their mask (their volume only changes when they are split).
+    volumes = np.bincount(out.ravel(), minlength=max_label + 1)
+    slices = ndi.find_objects(out) if max_label > 0 else []
+    pad = max(_gaussian_radius(max(float(smooth_sigma), 1e-3)), int(peak_min_distance_xy)) + 1
+
     for label_id in range(1, max_label + 1):
-        mask = out == label_id
+        if volumes[label_id] < 1.5 * expected_nucleus_vox or slices[label_id - 1] is None:
+            continue
+        sl = _padded_slice(slices[label_id - 1], out.shape, pad)
+        out_c = out[sl]  # view: writes go to out
+        mask = out_c == label_id
         voxel_count = int(np.count_nonzero(mask))
         if voxel_count < 1.5 * expected_nucleus_vox:
             continue
         if _label_roundness_xy(mask) >= min_roundness:
             continue
 
-        local_intensity = np.where(mask, intensity_img, 0.0).astype(np.float32)
+        intensity_c = intensity_img[sl]
+        local_intensity = np.where(mask, intensity_c, 0.0).astype(np.float32)
         local_distance = ndi.distance_transform_edt(mask, sampling=spacing)
         peak_coords_3d = detect_peaks_xy_intensity_aware(
             local_distance,
@@ -5415,7 +5532,7 @@ def _split_nonround_clusters_by_intensity_peaks(
             seeds[coord] = i
 
         elevation = _gradient_watershed_elevation(
-            intensity_img,
+            intensity_c,
             mask,
             spacing=spacing,
             smooth_sigma=smooth_sigma,
@@ -5455,7 +5572,7 @@ def _split_nonround_clusters_by_intensity_peaks(
         # pieces, gaps) keeps the original label id so it's still available
         # for the rethreshold pass or a later round of this same pass.
         for piece_mask in valid_pieces:
-            out[piece_mask] = next_label
+            out_c[piece_mask] = next_label
             next_label += 1
         split_count += 1
 
@@ -5541,15 +5658,29 @@ def _split_nonround_clusters_by_rethreshold(
     piece_roundness_floor = max(0.0, min_roundness * 0.8)
     min_core_vox = max(4, int(0.15 * expected_nucleus_vox))
 
+    # As `_split_nonround_clusters_by_intensity_peaks`: each candidate in its
+    # bounding box padded by the smoothing radius (+1), which gives the
+    # whole-image result; the smoothing is computed on that crop only
+    # (it was recomputed on the whole image for every candidate).
+    sigma = max(float(smooth_sigma), 1e-3)
+    volumes = np.bincount(out.ravel(), minlength=max_label + 1)
+    slices = ndi.find_objects(out) if max_label > 0 else []
+    pad = _gaussian_radius(sigma) + 1
+
     for label_id in range(1, max_label + 1):
-        mask = out == label_id
+        if volumes[label_id] < 1.5 * expected_nucleus_vox or slices[label_id - 1] is None:
+            continue
+        sl = _padded_slice(slices[label_id - 1], out.shape, pad)
+        out_c = out[sl]  # view: writes go to out
+        mask = out_c == label_id
         voxel_count = int(np.count_nonzero(mask))
         if voxel_count < 1.5 * expected_nucleus_vox:
             continue
         if _label_roundness_xy(mask) >= min_roundness:
             continue
 
-        smoothed = ndi.gaussian_filter(intensity_img.astype(np.float32), sigma=max(float(smooth_sigma), 1e-3))
+        intensity_c = intensity_img[sl]
+        smoothed = ndi.gaussian_filter(intensity_c.astype(np.float32), sigma=sigma)
         values = smoothed[mask]
         if values.size == 0:
             continue
@@ -5577,7 +5708,7 @@ def _split_nonround_clusters_by_rethreshold(
                 seeds[core_labels == old_id] = new_id
 
             elevation = _gradient_watershed_elevation(
-                intensity_img,
+                intensity_c,
                 mask,
                 spacing=spacing,
                 smooth_sigma=smooth_sigma,
@@ -5606,7 +5737,7 @@ def _split_nonround_clusters_by_rethreshold(
 
         if len(best_valid_pieces) >= 2:
             for piece_mask in best_valid_pieces:
-                out[piece_mask] = next_label
+                out_c[piece_mask] = next_label
                 next_label += 1
             split_count += 1
 
@@ -5877,6 +6008,40 @@ def segment_nuclei_watershed(
     erosion_triplets = []
     scales_with_seeds = 0
 
+    # Voxels of a mask component touching the image border (whose seeds may
+    # be smaller), computed once.
+    boundary_cc_lut = np.zeros(int(cc_labels_for_boundary.max()) + 1, dtype=bool)
+    if boundary_components:
+        boundary_cc_lut[np.fromiter(boundary_components, dtype=np.int64)] = True
+    in_boundary_cc = boundary_cc_lut[cc_labels_for_boundary]
+    del boundary_cc_lut
+
+    def _valid_seed_ids(mk, num_seeds):
+        # Seeds big enough to keep: per-seed size and border contact counted
+        # in one pass each, instead of one whole-image mask per seed.
+        sizes = np.bincount(mk.ravel(), minlength=num_seeds + 1)
+        touches = np.bincount(mk[in_boundary_cc], minlength=num_seeds + 1) > 0
+        threshold = np.where(touches, min_seed_vox_boundary, min_seed_vox)
+        ok = sizes >= threshold
+        ok[0] = False
+        return np.flatnonzero(ok)
+
+    def _add_seeds(mk, num_seeds, seed_ids):
+        # Seeds overlapping no marker yet get the next marker ids, in seed
+        # order (seeds of one erosion are disjoint, so checking them all
+        # against the markers before this erosion is the same as one by one).
+        nonlocal next_marker
+        taken = np.bincount(mk[markers > 0], minlength=num_seeds + 1) > 0
+        new_ids = [int(s) for s in seed_ids if not taken[s]]
+        if not new_ids:
+            return
+        lut = np.zeros(num_seeds + 1, dtype=np.int32)
+        lut[new_ids] = np.arange(next_marker + 1, next_marker + 1 + len(new_ids), dtype=np.int32)
+        added = lut[mk]
+        sel = added > 0
+        markers[sel] = added[sel]
+        next_marker += len(new_ids)
+
     for d_factor in diameter_factors:
         shrink_um = nuclei_diameter * d_factor * nuclei_bridge_shrink_factor
         er_z_i = max(1, int(shrink_um / effective_r_zZ))
@@ -5893,34 +6058,12 @@ def segment_nuclei_watershed(
         if num_i == 0:
             continue
 
-        valid_ids = []
-        for seed_id in range(1, num_i + 1):
-            seed_mask = mk_i == seed_id
-            seed_size = int(np.sum(seed_mask))
-
-            overlaps_boundary = False
-            overlapping_cc_ids = np.unique(cc_labels_for_boundary[seed_mask])
-            overlapping_cc_ids = overlapping_cc_ids[overlapping_cc_ids > 0]
-            if len(overlapping_cc_ids) > 0:
-                overlaps_boundary = any(
-                    int(cc_id) in boundary_components for cc_id in overlapping_cc_ids
-                )
-
-            threshold = min_seed_vox_boundary if overlaps_boundary else min_seed_vox
-            if seed_size >= threshold:
-                valid_ids.append(seed_id)
-
+        valid_ids = _valid_seed_ids(mk_i, num_i)
         if len(valid_ids) == 0:
             continue
 
         scales_with_seeds += 1
-
-        for seed_id in valid_ids:
-            seed_mask = mk_i == seed_id
-            if np.any(markers[seed_mask]):
-                continue
-            next_marker += 1
-            markers[seed_mask] = next_marker
+        _add_seeds(mk_i, num_i, valid_ids)
 
     num = int(markers.max())
 
@@ -5937,28 +6080,10 @@ def segment_nuclei_watershed(
             mk_r, num_r = ndi.label(eroded_r)
             if num_r == 0:
                 continue
-
-            for seed_id in range(1, num_r + 1):
-                seed_mask = mk_r == seed_id
-                seed_size = int(np.sum(seed_mask))
-
-                overlaps_boundary = False
-                overlapping_cc_ids = np.unique(cc_labels_for_boundary[seed_mask])
-                overlapping_cc_ids = overlapping_cc_ids[overlapping_cc_ids > 0]
-                if len(overlapping_cc_ids) > 0:
-                    overlaps_boundary = any(
-                        int(cc_id) in boundary_components for cc_id in overlapping_cc_ids
-                    )
-
-                threshold = min_seed_vox_boundary if overlaps_boundary else min_seed_vox
-                if seed_size < threshold:
-                    continue
-                if np.any(markers[seed_mask]):
-                    continue
-                next_marker += 1
-                markers[seed_mask] = next_marker
+            _add_seeds(mk_r, num_r, _valid_seed_ids(mk_r, num_r))
 
         num = int(markers.max())
+    del in_boundary_cc
 
     # Fallback: if shrinking removes everything, keep one seed per
     # connected component of the original mask rather than failing.
@@ -5979,13 +6104,21 @@ def segment_nuclei_watershed(
     )
     peak_threshold_fraction = 0.45
 
+    # Each component is handled in its bounding box, padded by the peak
+    # search distance (+1) so the peaks found are the whole-image ones.
+    cc_slices = ndi.find_objects(cc_labels)
+    cc_pad = peak_min_distance_xy + 1
     for cc_id in _progress_iter(
         range(1, num_cc + 1), progress, desc='Step 17 - Seed Nuclei Components', leave=False
     ):
-        cc_mask = cc_labels == cc_id
-        cc_marker_ids = np.unique(markers[cc_mask])
+        if cc_slices[cc_id - 1] is None:
+            continue
+        sl = _padded_slice(cc_slices[cc_id - 1], cc_labels.shape, cc_pad)
+        markers_c = markers[sl]  # view: writes go to markers
+        cc_mask = cc_labels[sl] == cc_id
+        cc_marker_ids = np.unique(markers_c[cc_mask])
         cc_marker_ids = cc_marker_ids[cc_marker_ids > 0]
-        local_distance = np.where(cc_mask, distance, 0.0)
+        local_distance = np.where(cc_mask, distance[sl], 0.0)
 
         # Recovery for dumbbell-like nuclei, or two touching-but-individually-
         # round nuclei with too shallow a geometric neck for erosion to
@@ -5997,7 +6130,7 @@ def segment_nuclei_watershed(
         # peaks. Uses 2D XY projection to prevent over-splitting across Z.
         if cc_marker_ids.size <= 1 and np.any(cc_mask):
             if use_intensity:
-                local_intensity = np.where(cc_mask, smoothed_intensity, 0.0)
+                local_intensity = np.where(cc_mask, smoothed_intensity[sl], 0.0)
                 peak_coords_3d = detect_peaks_xy_intensity_aware(
                     local_distance,
                     local_intensity,
@@ -6015,20 +6148,20 @@ def segment_nuclei_watershed(
 
             if len(peak_coords_3d) >= 2:
                 if cc_marker_ids.size == 1:
-                    markers[(markers == int(cc_marker_ids[0])) & cc_mask] = 0
+                    markers_c[(markers_c == int(cc_marker_ids[0])) & cc_mask] = 0
                 for peak_coord in peak_coords_3d:
-                    if markers[peak_coord] != 0:
+                    if markers_c[peak_coord] != 0:
                         continue
                     next_marker += 1
-                    markers[peak_coord] = next_marker
+                    markers_c[peak_coord] = next_marker
                     added_peak_seed_count += 1
-                cc_marker_ids = np.unique(markers[cc_mask])
+                cc_marker_ids = np.unique(markers_c[cc_mask])
                 cc_marker_ids = cc_marker_ids[cc_marker_ids > 0]
 
         if cc_marker_ids.size == 0:
             seed_pos = np.unravel_index(np.argmax(local_distance), local_distance.shape)
             next_marker += 1
-            markers[seed_pos] = next_marker
+            markers_c[seed_pos] = next_marker
             added_seed_count += 1
 
     if use_intensity:
@@ -6181,14 +6314,145 @@ def segment_nuclei_watershed(
     return im_out, debug_info
 
 
+# ── Optional processing steps (Cells 9-14) ─────────────────────────────────
+# Each processing cell (9-14) can be skipped: a step reads the most recent
+# stage computed before it (e.g. Cell 12 reads the 'Zoomed image' when Cell 11
+# was not run), and `complete_skipped_steps` (Cell 15) stands the stage of
+# every skipped step in for its input, so the threshold and every later cell
+# find the stage names they read. Skipping Cells 9-14 all together thresholds
+# the original image of Cell 8 (only rescaled to 0-255, the range the
+# contrast settings and the threshold work in).
+
+PROCESSING_STAGES = (  # (stage, the step that makes it), in pipeline order
+    ('Original image', 'Cell 8 - original image'),
+    ('Normalized image', 'Cell 9 - normalization (and depth correction)'),
+    ('Zoomed image', 'Cell 10 - resampling to isotropic voxels'),
+    ('Denoised image', 'Cell 11 - denoising (and haze removal)'),
+    ('Adjusted image', 'Cell 12 - contrast and gamma'),
+    ('Filtered image', 'Cell 13 - Gaussian smoothing'),
+    ('Equalized image', 'Cell 14 - histogram equalization'),
+)
+_STAGE_NAMES = tuple(name for name, _ in PROCESSING_STAGES)
+_STEPS_RUN_KEY = '_processing_steps_run'  # not an image: skipped by .items() users
+
+
+def reset_processing_steps(im_final_stack):
+    """Drop every processing stage after the original image (Cell 8).
+
+    Called at the end of Cell 8, so a re-run that skips some of Cells 9-14
+    never picks up a stage left over from an earlier run.
+    """
+    for name in _STAGE_NAMES[1:] + ('Threshold image',):
+        im_final_stack.pop(name, None)
+    im_final_stack[_STEPS_RUN_KEY] = []  # none of Cells 9-14 run yet
+    gc.collect()
+    return im_final_stack
+
+
+def _stage_input(im_final_stack, stage):
+    """``(name, image)`` of the most recent stage before *stage*.
+
+    The original image is rescaled to 0-255 per channel (as Cell 9 does) when
+    it is the input of a later step: the contrast settings and the threshold
+    work in that range.
+    """
+    i = _STAGE_NAMES.index(stage) if stage in _STAGE_NAMES else len(_STAGE_NAMES)
+    for name in reversed(_STAGE_NAMES[:i]):
+        if name in im_final_stack:
+            img = im_final_stack[name]
+            if name == 'Original image' and stage != 'Normalized image':
+                img = normalize_image_channels(img)
+            return name, img
+    raise KeyError(f"No image stage before '{stage}' in im_final_stack: run Cells 7-8 first.")
+
+
+def _store_stage(im_final_stack, stage, image):
+    """Store *stage* and drop every later stage (now outdated)."""
+    i = _STAGE_NAMES.index(stage)
+    for name in _STAGE_NAMES[i + 1:] + ('Threshold image',):
+        im_final_stack.pop(name, None)
+    im_final_stack[stage] = image
+    steps = im_final_stack.setdefault(_STEPS_RUN_KEY, [])
+    steps[:] = [s for s in steps if _STAGE_NAMES.index(s) < i] + [stage]
+    return im_final_stack
+
+
+def _fill_skipped_stages(im_final_stack):
+    """Give each skipped stage from 'Zoomed image' on the image of the stage
+    before it (same array, no copy). Returns the names of the filled stages."""
+    filled = []
+    for name in _STAGE_NAMES[2:]:  # 'Zoomed image' ... 'Equalized image'
+        if name not in im_final_stack:
+            _, im_final_stack[name] = _stage_input(im_final_stack, name)
+            filled.append(name)
+    im_final_stack.pop('Normalized image', None)  # not read past resampling
+    return filled
+
+
+def complete_skipped_steps(im_final_stack, zoom_factors, r_xyz):
+    """Cell 15: complete the stages of the processing steps that were skipped.
+
+    Every skipped step (Cells 9-14) passes its input through unchanged, so
+    the threshold works on the last stage computed (the original image of
+    Cell 8, rescaled to 0-255, when all of them were skipped). Without
+    resampling (Cell 10), the image keeps its original voxel size: the zoom
+    factors become 1 and the voxel sizes are the original ones.
+
+    Parameters
+    ----------
+    im_final_stack : dict
+    zoom_factors : list of 3 float
+        [Z, Y, X] resampling factors of Cell 8.
+    r_xyz : tuple of float
+        Original voxel size (r_X, r_Y, r_Z) in um.
+
+    Returns
+    -------
+    im_final_stack : dict
+    zoom_factors : list of 3 float
+        Unchanged, or [1, 1, 1] if the resampling was skipped.
+    r_zX, r_zY, r_zZ : float
+        Voxel size of the processed image in um.
+    skipped_steps : list of str
+        The steps that were skipped (for the report).
+    """
+    r_X, r_Y, r_Z = r_xyz
+    steps_run = im_final_stack.get(_STEPS_RUN_KEY, [])
+    skipped = [label for name, label in PROCESSING_STAGES[1:] if name not in steps_run]
+    input_stage = next(n for n in reversed(_STAGE_NAMES) if n in im_final_stack)
+
+    if 'Zoomed image' in im_final_stack:
+        zoom_factors = list(zoom_factors)
+        r_zX, r_zY, r_zZ = r_X / zoom_factors[2], r_Y / zoom_factors[1], r_Z / zoom_factors[0]
+    else:
+        zoom_factors = [1.0, 1.0, 1.0]
+        r_zX, r_zY, r_zZ = r_X, r_Y, r_Z
+    _fill_skipped_stages(im_final_stack)
+
+    if skipped:
+        print("Skipped processing steps (their input is passed on unchanged):")
+        for label in skipped:
+            print(f"  - {label}")
+        print(f"The threshold works on the '{input_stage}'"
+              + (" (rescaled to 0-255)." if input_stage == 'Original image' else "."))
+        if 'Zoomed image' not in steps_run:
+            print(f"No resampling: the image keeps its original voxel size "
+                  f"[{r_zX:.4g}, {r_zY:.4g}, {r_zZ:.4g}] um (zoom factors set to 1).")
+    else:
+        print("All processing steps (Cells 9-14) were run.")
+    return im_final_stack, zoom_factors, r_zX, r_zY, r_zZ, skipped
+
+
 # ── Pipeline wrappers (Cell-level helpers) ─────────────────────────────────
 # Each function handles one processing step end-to-end:
 # updates im_final_stack in-place, plots the resulting histogram, and returns
-# the updated stack (plus any derived values).
+# the updated stack (plus any derived values). Each step reads the most
+# recent stage before it, so any of them can be skipped (see above).
 
 def run_normalize(im_final_stack, stain_complete_df):
     """Normalize each channel to [0, 255] and display histogram."""
-    im_final_stack['Normalized image'] = normalize_image_channels(im_final_stack['Original image'])
+    _store_stage(im_final_stack, 'Normalized image',
+                 normalize_image_channels(im_final_stack['Original image']))
     hist_plot(im_final_stack['Normalized image'], stain_complete_df)
     return im_final_stack
 
@@ -6201,12 +6465,14 @@ def run_resample(im_final_stack, stain_complete_df, zoom_factors, meta):
     im_final_stack : dict
     r_zX, r_zY, r_zZ : float  —  isotropic voxel sizes in µm
     """
-    im_final_stack['Zoomed image'], r_zX, r_zY, r_zZ = resample_to_isotropic(
-        im_final_stack['Normalized image'], zoom_factors, meta=meta
-    )
+    source, img = _stage_input(im_final_stack, 'Zoomed image')
+    zoomed, r_zX, r_zY, r_zZ = resample_to_isotropic(img, zoom_factors, meta=meta)
+    _store_stage(im_final_stack, 'Zoomed image', zoomed)
     # 'Normalized image' is not used past this point; drop it to free RAM
     # before the (larger, isotropic) downstream stages accumulate.
-    del im_final_stack['Normalized image']
+    if source == 'Normalized image':
+        del im_final_stack['Normalized image']
+    del img
     gc.collect()
     hist_plot(im_final_stack['Zoomed image'], stain_complete_df)
     return im_final_stack, r_zX, r_zY, r_zZ
@@ -6214,16 +6480,17 @@ def run_resample(im_final_stack, stain_complete_df, zoom_factors, meta):
 
 def run_denoise(im_final_stack, stain_complete_df):
     """Apply median filter for noise removal and display histogram."""
-    im_final_stack['Denoised image'] = apply_median_denoise(im_final_stack['Zoomed image'])
+    _, img = _stage_input(im_final_stack, 'Denoised image')
+    _store_stage(im_final_stack, 'Denoised image', apply_median_denoise(img))
     hist_plot(im_final_stack['Denoised image'], stain_complete_df)
     return im_final_stack
 
 
 def run_contrast_gamma(im_final_stack, stain_complete_df):
     """Apply per-channel contrast and gamma adjustments and display histogram."""
-    im_final_stack['Adjusted image'] = apply_contrast_gamma_per_channel(
-        im_final_stack['Denoised image'], stain_complete_df
-    )
+    _, img = _stage_input(im_final_stack, 'Adjusted image')
+    _store_stage(im_final_stack, 'Adjusted image',
+                 apply_contrast_gamma_per_channel(img, stain_complete_df))
     hist_plot(im_final_stack['Adjusted image'], stain_complete_df)
     return im_final_stack
 
@@ -6238,9 +6505,8 @@ def run_smooth(im_final_stack, stain_complete_df, sigma=0.5):
         Controls noise suppression vs. detail preservation.
         0 = no smoothing; 0.5 (default) = mild; 1–2 = stronger (noisier data).
     """
-    im_final_stack['Filtered image'] = apply_gaussian_smoothing(
-        im_final_stack['Adjusted image'], sigma
-    )
+    _, img = _stage_input(im_final_stack, 'Filtered image')
+    _store_stage(im_final_stack, 'Filtered image', apply_gaussian_smoothing(img, sigma))
     hist_plot(im_final_stack['Filtered image'], stain_complete_df)
     return im_final_stack
 
@@ -6258,9 +6524,9 @@ def run_equalize(im_final_stack, stain_complete_df, num_plateaus=2, plateau_fact
         Clipping height relative to the mean histogram bin count.
         Lower = stronger clipping. Typical range 0.5–1.0.
     """
-    im_final_stack['Equalized image'] = apply_histogram_equalization_per_channel(
-        im_final_stack['Filtered image'], num_plateaus, plateau_factor
-    )
+    _, img = _stage_input(im_final_stack, 'Equalized image')
+    _store_stage(im_final_stack, 'Equalized image',
+                 apply_histogram_equalization_per_channel(img, num_plateaus, plateau_factor))
     hist_plot(im_final_stack['Equalized image'], stain_complete_df)
     return im_final_stack
 
@@ -6295,6 +6561,7 @@ def run_threshold(im_final_stack, stain_complete_df,
         (default 0.60). The remainder (``1 - global_threshold_weight -
         sauvola_weight``) is given to the statistical background threshold.
     """
+    _fill_skipped_stages(im_final_stack)  # skipped Cells 9-14 pass their input on
     im_final_stack["Threshold image"] = apply_threshold_per_channel(
         im_final_stack["Equalized image"],
         stain_complete_df=stain_complete_df,
@@ -10271,7 +10538,9 @@ def view_processing_results(
     denoised, corrected, filtered, equalized), plus a per-channel "Thresh
     islands" labels layer (connected components of the threshold mask) so
     nuclei/marker regions missed or fragmented by thresholding are visible.
-    Only the equalized and threshold-island layers start visible.
+    Only the original image and the processing steps that were run (Cells
+    9-14 can be skipped) are shown; the last of them (the threshold's input)
+    and the threshold-island layers start visible.
     Viewer 1 (only when NUCLEI or CYTOPLASM is present) shows label overlays for
     nuclei, cytoplasm, PCM, and marker channels; the marker labels start hidden.
 
@@ -10321,7 +10590,20 @@ def view_processing_results(
     # added — napari keeps its own reference, so nothing disappears from the
     # viewer, but the dict stops double-holding these large arrays.
     _stages_freed_after_view = ('Original image', 'Zoomed image', 'Denoised image', 'Adjusted image')
-    for stage_key, stage_prefix, scale in _progress_iter(stages, progress, desc='Step 22A - Add Layers To Viewer 0'):
+    # Only the original image and the processing steps actually run (Cells
+    # 9-14 can be skipped; a skipped stage only holds its input again).
+    steps_run = im_final_stack.get(_STEPS_RUN_KEY)
+    if steps_run is not None:
+        shown = [s for s in stages if s[0] == 'Original image' or s[0] in steps_run]
+        if 'Normalized image' in steps_run and 'Zoomed image' not in steps_run:
+            # Normalized but not resampled: the 'Zoomed image' holds the normalized image
+            shown.insert(1, ('Zoomed image', 'NORMALIZED', scale_zoom))
+    else:
+        shown = stages
+    # The last stage shown (the threshold's input) starts visible, with the
+    # threshold islands below; the earlier stages are hidden but can be toggled on.
+    visible_key = shown[-1][0]
+    for stage_key, stage_prefix, scale in _progress_iter(shown, progress, desc='Step 22A - Add Layers To Viewer 0'):
         for c in range(im_thr.shape[3]):
             idx = stain_complete_df.index[c]
             marker = stain_complete_df.loc[idx, 'Marker']
@@ -10330,13 +10612,13 @@ def view_processing_results(
                 im_final_stack[stage_key][:, :, :, c],
                 name=f'{stage_prefix} {idx} ({marker})', colormap=color,
                 blending='additive', scale=scale,
-                # Only EQ starts visible (with the threshold islands below);
-                # the earlier stages are hidden but can be toggled on.
-                visible=(stage_key == 'Equalized image'),
+                visible=(stage_key == visible_key),
             )
         if stage_key in _stages_freed_after_view:
             del im_final_stack[stage_key]
             gc.collect()
+    for stage_key in _stages_freed_after_view:  # stages of skipped steps (not shown)
+        im_final_stack.pop(stage_key, None)
 
     # Connected-component "islands" of the per-channel threshold mask, so
     # under-segmented/missed nuclei (broken-up or absent islands) are easy to
@@ -11503,6 +11785,9 @@ BATCH_NUCLEI_OPTIONS = {
     "nuclei_tall_volume_factor": 1.15, "nuclei_tall_elongation_factor": 0.0,
     "nuclei_rescue_contrast": 0.0, "nuclei_rescue_grow_fraction": 0.35,
     "auto_adapt": False,  # v1.6.4: adapt the settings to each image (adapt_settings_to_image)
+    # LD: False = keep the scale_factor as given (set in custom_settings)
+    # when the settings are adapted to each image
+    "adapt_scale": True,
     # v1.6.4: "calibrated" = NUCLEI contrast of every image from its own
     # histogram (`calibrated_contrast`), whatever the setup / automatic_contrast
     "nuclei_contrast": None,
@@ -12950,13 +13235,15 @@ def _ld_nuclear_view(original_image, stain_complete_df, nuclear_conditions):
 
 
 def ld_adapt_settings_to_image(original_image, stain_complete_df, voxel_size_zyx,
-                               nuclear_conditions, settings, verbose=True):
+                               nuclear_conditions, settings, verbose=True, adapt_scale=True):
     """`adapt_settings_to_image` for the LIVE/DEAD notebook: the typical
     nucleus is measured in the merged nuclear markers (`_ld_nuclear_view`)
     and ``settings`` (``nuclei_diameter``, ``scale_factor`` and the um
     settings) adapted to it. Returns ``(adapted settings, changes)``; nothing
     changes without nuclear markers or when too few nuclei are measured
-    (e.g. a DEAD marker alone, with few dead cells)."""
+    (e.g. a DEAD marker alone, with few dead cells). ``adapt_scale=False``
+    (a ``scale_factor`` set in ``custom_settings``) keeps the
+    ``scale_factor`` as given."""
     if not nuclear_conditions:
         if verbose:
             print("No nuclear marker: settings not adapted to the image.")
@@ -12966,7 +13253,8 @@ def ld_adapt_settings_to_image(original_image, stain_complete_df, voxel_size_zyx
     view = _ld_nuclear_view(original_image, stain_complete_df, nuclear_conditions)
     measurement = measure_nuclei_in_image(view, voxel_size_zyx, contrast=None, verbose=verbose)
     del view
-    return adapt_nuclei_settings(measurement, settings, voxel_size_zyx, verbose=verbose)
+    return adapt_nuclei_settings(measurement, settings, voxel_size_zyx, adapt_scale=adapt_scale,
+                                 verbose=verbose)
 
 
 def ld_remove_nuclear_haze(denoised, stain_complete_df, nuclear_conditions, radius_um,
@@ -14421,7 +14709,8 @@ def _process_single_image_ld_batch(
             nuclear_in_image,
             {"nuclei_diameter": nuclei_diameter, "scale_factor": scale_factor,
              "z_bg_radius_um": opts["z_bg_radius_um"],
-             "nuclei_edge_margin_um": opts["nuclei_edge_margin_um"]})
+             "nuclei_edge_margin_um": opts["nuclei_edge_margin_um"]},
+            adapt_scale=opts["adapt_scale"])
         nuclei_diameter = adapted["nuclei_diameter"]
         opts["z_bg_radius_um"] = adapted["z_bg_radius_um"]
         opts["nuclei_edge_margin_um"] = adapted["nuclei_edge_margin_um"]
@@ -14429,7 +14718,7 @@ def _process_single_image_ld_batch(
             scale_factor = adapted["scale_factor"]
             zooms = [z * scale_factor for z in zoom_factors]
         adapted_note = "; ".join(f"{n} {o} -> {v}" for n, o, v, _ in changes) or "no change"
-    elif opts["auto_adapt"] and is_2d:  # 2D: resolution only, for the given nucleus size
+    elif opts["auto_adapt"] and is_2d and opts["adapt_scale"]:  # 2D: resolution only, for the given nucleus size
         scale_factor, changes = adapt_scale_2d(nuclei_diameter, scale_factor, r_X)
         zooms = [z * scale_factor for z in zoom_factors]
         zooms[0] = 1.0  # never resample a single plane along Z
