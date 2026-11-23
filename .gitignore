@@ -1,0 +1,53 @@
+# Python environments
+.ven*/
+ven*/
+env/
+
+# Python cache / build artifacts
+__pycache__/
+*.py[cod]
+
+# Claude Code session files
+.claude/
+
+# Jupyter temporary files
+.ipynb_checkpoints/
+
+# Local notebook/output variants
+*_o.ipynb
+*.bak
+
+# OS / editor clutter
+.DS_Store
+Thumbs.db
+.vscode/
+
+# Logs and temporary files
+*.log
+*.tmp
+*.temp
+
+# Old versions
+old_v/
+NucleoSeg3D_v1.6.3.ipynb
+
+# Per-experiment setup files, written to the folder the notebook runs in
+# (stain table and contrast of <name_setup>)
+*_stain_dict.json
+*_ld_stain_dict.json
+*_setup.csv
+
+# Pipeline outputs: written next to the input image, ignored here in case an
+# image is processed from inside the repository
+*.ldpair
+*_output/
+*_LD_pairs_output/
+*_histograms.xlsx
+*_segmentation.xlsx
+*_live_dead.xlsx
+*_live_dead.png
+*_nuclei_marker.pdf
+*_marker_intensity.png
+*_labelled.vtk
+*_FEA.inp
+*.stl

@@ -2,15 +2,27 @@
 
 **NucleoSeg3D** is a Jupyter-notebook pipeline for the segmentation and quantification of nuclei, cells and fluorescent markers in 3D (and 2D) microscopy images, built on the Napari ecosystem. It targets researchers in bioimage analysis who need a robust, reproducible workflow for volumetric fluorescence data.
 
-Current version: **v1.6.4** (`NucleoSeg3D_v1.6.4.ipynb`).
+Current version: **v1.6.41** (`NucleoSeg3D_v1.6.41.ipynb`). The previous version, **v1.6.4** (`NucleoSeg3D_v1.6.4.ipynb`), is kept with its own validated settings. The LIVE/DEAD notebook is **v1.2.2** (`NucleoSeg3D_LD_v1.2.2.ipynb`).
 
-### What's new in v1.6.4
+### What's new in v1.6.41
+- **Re-validated settings**: re-tuned on six manually annotated images, each scored as a new image (nuclei mean F1 0.56, F1@0.5 0.77, against 0.43 / 0.69 for the previous tuning round, which had no histogram rule). They are read from `helpers/optimal_settings_v1.6.41.json`. See [Validation](#validation).
+- **Settings that follow the image quality**: some settings are read off each channel's histogram (background, noise, signal-to-noise ratio) in Cell 8 (`helpers/histogram_adapt.py`). For now this is the nuclei edge fraction: lower in a noisy NUCLEI channel, higher in a clean one. A setting named in `custom_settings` is never changed by these rules.
+- **NUCLEI contrast**: the calibrated NUCLEI contrast now uses gamma 1.15 (`nuclei_gamma`) instead of 1.0.
+- **Last Z slice kept**: the resampling (Cell 10) repeats the edge voxel instead of padding with zeros (`resample_edge_mode = 'nearest'`), so nuclei at the bottom of a shrunk stack are no longer lost.
+- **Cell bodies with their own settings** (Cell 18): the cytoplasm / membrane stains get their own threshold, and every cell is completed by the dim rim of its body (`cyto_grow_um`). These settings (`cyto_*`) were tuned against Cellpose cell bodies of the annotated nuclei.
+- Batch mode applies all of the above to every image.
+
+### In all notebooks (v1.6.4, v1.6.41 and LIVE/DEAD v1.2.2)
+- **Optional processing steps**: Cells 9–14 (normalization, resampling, denoising, contrast, smoothing, equalization) can each be skipped. A skipped cell passes its input on unchanged and the next cell works on the last image computed. Skipping all of them thresholds the original image of Cell 8 (only rescaled to 0–255). Cell 15 lists the skipped steps, and they are written to the parameters sheet of the histogram Excel file. Without resampling (Cell 10) the image keeps its original voxel size. To change which steps run, re-run from Cell 8. Skipping any step departs from the validated settings.
+- **Processing viewer**: the napari viewer of the processing steps shows the original image and only the steps that were run. The last of them, the image that was thresholded, starts visible.
+- **Faster with many cells**: the per-cell steps of the segmentation (seeding, re-split of merged clusters, roundness filter, Z split and merge) and of the quantification now work in each cell's bounding box instead of the whole image. The results are the same. Before, these steps grew with cells × voxels, which made images with many cells (typical in LIVE/DEAD) slow, especially at a fine resolution. `helpers/check_speedups.py` compares the old and new code on a synthetic image (see [Usage](#usage)).
+
+### What came in v1.6.4
 - **Validated segmentation settings**: every nuclei-segmentation setting (smoothing, threshold, watershed split, size refinement, haze removal, edges, …) was tuned against four manually annotated images (mean F1 0.51, F1@0.5 0.74) and is read from `helpers/optimal_settings_v1.6.4.json`. They are no longer edited in the notebook; any one can still be changed by name with `custom_settings` (Cell 4).
 - **NUCLEI contrast from the image**: the NUCLEI channel contrast/gamma is always set from its own histogram, with the rule the settings were validated with.
 - **Nucleus size from the image**: `nuclei_diameter` is only a starting value; the typical nucleus is measured in each image and the nucleus size, resolution (`scale_factor`) and µm sizes are adapted to it (3D images).
 - **New NUCLEI steps**: out-of-focus haze removal slice by slice, optional depth (Z attenuation) correction, trim of Z flares, split of nuclei stacked in Z, nuclei the threshold missed added back, and every nucleus edge redrawn relative to its own brightness.
 - **Calibrated automatic contrast** for the marker channels: `automatic_contrast = 'calibrated'`.
-- Batch mode applies all of the above to every image.
 
 ### LIVE/DEAD notebook: v1.2.2 (`NucleoSeg3D_LD_v1.2.2.ipynb`)
 Segments LIVE/DEAD-stained images and calls every cell LIVE or DEAD, with the same workflow as NucleoSeg3D v1.6.4.
@@ -23,6 +35,7 @@ Segments LIVE/DEAD-stained images and calls every cell LIVE or DEAD, with the sa
 - **The call**: a cell positive for any DEAD marker is DEAD; one positive only for LIVE markers is LIVE (`ld_rule = "dead_priority"`). With Hoechst as `LIVE_2`: Hoechst only → LIVE, Hoechst + DEAD → DEAD. A cell positive for no LIVE and no DEAD marker is **UNCLASSIFIED**. It is reported in the summary, plots, napari (grey) and Excel, but left out of the viability, which is LIVE / (LIVE + DEAD). The batch summary has an `UNCLASSIFIED` column.
 - **Bright signal only**: LIVE/DEAD stains are binary. After the threshold, the masks of the call markers (LIVE, DEAD and any `LIVE_2` / `DEAD_2`) keep only objects whose peak stands out clearly. The peak must be at least `ld_min_brightness` (0.3) × the typical bright cell above background, and `ld_min_snr` (5) × the noise. Voxels below `ld_edge_brightness` (0.15) × the typical bright cell become background. This drops out-of-focus cells (in 2D, often light from another depth) and halos. A channel with no clearly bright object (e.g. no dead cells) ends up with no positive cells. These defaults are a starting point, not validated values. Set any factor to 0 to turn that test off.
 - **Rescue of missed nuclei off**: positivity is read from the threshold masks, so a rescued nucleus would be positive for no marker (`LD_OVERRIDES` in `helpers/optimal_settings_ld.py`; `custom_settings` can switch it back on).
+- **Resolution of your choice**: by default the image is resampled so that a nucleus spans 12–19 voxels, the range the settings were tuned at. A `scale_factor` set in `custom_settings` (Cell 4), e.g. `{"scale_factor": 0.75}`, is used as given instead, also in batch mode. Cell 8 then prints how many voxels a nucleus spans at that scale. The run time grows with the number of voxels, about as `scale_factor`³ in 3D.
 - The LIVE/DEAD call (`min_positive_fraction`, `ld_rule`) and the bright-signal filter stay experiment choices in Cell 3.
 
 > **Disclaimer:** This repository is freely available for use. The associated pipeline is currently being prepared for publication — please contact [Edoardo Borgiani](https://github.com/edoborgiani) for more information on how to use the pipeline or for collaboration enquiries.
@@ -34,9 +47,9 @@ Segments LIVE/DEAD-stained images and calls every cell LIVE or DEAD, with the sa
 - **Automatic splitting of touching nuclei and cells**: a built-in first pass (including splitting a nucleus that forks into separate islands above and below its centre), then a size-based refinement that re-splits oversized labels with increasingly aggressive settings and merges small fragments into their neighbour. In addition:
   - **split gamma**: a gamma > 1 on the intensity used to split makes the dim seams between touching objects darker faster than the signal, so the split zones are more distinct; it grows at every re-split level;
   - **merge of split slivers**: slivers of a few pixels/voxels left by a split are merged into the closest big piece of the same split.
-- **Image processing**: normalization, resampling to isotropic voxel size, denoising, thresholding, and watershed / StarDist / Cellpose segmentation (3D, or 2D on a 2D image).
+- **Image processing**: normalization, resampling to isotropic voxel size, denoising, contrast, smoothing and equalization (each optional), thresholding, and watershed / StarDist / Cellpose segmentation (3D, or 2D on a 2D image).
 - **Interactive ROI selection**: set `interactive_roi = True` to drag a rectangle in a napari window instead of typing pixel coordinates.
-- **Validated settings**: the nuclei segmentation runs with settings validated against manual ground truths (`helpers/optimal_settings_v1.6.4.json`); the NUCLEI contrast and the nucleus size are taken from each image.
+- **Validated settings**: the segmentation runs with settings validated against manual ground truths (`helpers/optimal_settings_v1.6.41.json`; v1.6.4: `helpers/optimal_settings_v1.6.4.json`). The NUCLEI contrast, the nucleus size and (v1.6.41) the settings that depend on the image quality are taken from each image.
 - **Automatic contrast**: set `automatic_contrast = 'calibrated'` (or `True` for the older histogram rule) to skip the interactive napari contrast/gamma viewer for the marker channels and pick contrast limits per channel from the histogram.
 - **Napari integration**: interactive visualization at each processing step.
 - **Quantification & export**: per-cell marker statistics (for positive cells and for all cells), spatial and size distributions, Excel reports, per-cell KDE plots and a PDF report, and 3D mesh export (VTK/STL/INP, 3D images only).
@@ -45,20 +58,26 @@ Segments LIVE/DEAD-stained images and calls every cell LIVE or DEAD, with the sa
 ## Repository Structure
 ```
 .
-├── NucleoSeg3D_v1.6.4.ipynb        # The NucleoSeg3D notebook (current)
-├── NucleoSeg3D_v1.6.3.ipynb        # Previous version
-├── NucleoSeg3D_LD_v1.2.2.ipynb     # The LIVE/DEAD notebook (current)
-├── requirements.txt                # Python dependencies
-├── overrides.txt                   # uv --override file (see Prerequisites)
-├── README.md                       # This file
+├── NucleoSeg3D_v1.6.41.ipynb        # The NucleoSeg3D notebook (current)
+├── NucleoSeg3D_v1.6.4.ipynb         # Previous version (v1.6.4 settings)
+├── NucleoSeg3D_v1.6.3.ipynb         # Older version
+├── NucleoSeg3D_LD_v1.2.2.ipynb      # The LIVE/DEAD notebook (current, v1.6.4 settings)
+├── requirements.txt                 # Python dependencies
+├── overrides.txt                    # uv --override file (see Prerequisites)
+├── README.md                        # This file
 └── helpers/
     ├── __init__.py
-    ├── notebook_helpers.py         # Core processing, segmentation, and export functions
-    ├── notebook_setup_helpers.py   # Package installation and import loader
-    ├── optimal_settings.py         # Loads the validated settings and applies them per image
-    ├── optimal_settings_ld.py      # The same settings for the LIVE/DEAD notebook (nuclear markers)
-    └── optimal_settings_v1.6.4.json # Validated segmentation settings and their scores
+    ├── notebook_helpers.py          # Core processing, segmentation, and export functions
+    ├── notebook_setup_helpers.py    # Package installation and import loader
+    ├── optimal_settings.py          # Loads the validated settings of one version and applies them per image
+    ├── optimal_settings_ld.py       # The v1.6.4 settings for the LIVE/DEAD notebook (nuclear markers)
+    ├── histogram_adapt.py           # Settings read off each channel's histogram (v1.6.41)
+    ├── optimal_settings_v1.6.41.json # Validated settings of v1.6.41 and their scores
+    ├── optimal_settings_v1.6.4.json  # Validated settings of v1.6.4 and their scores
+    └── check_speedups.py            # Checks that the faster per-cell steps give the same results
 ```
+
+Each notebook loads its own settings file (`load_optimal_settings(..., version="1.6.41")` in v1.6.41; v1.6.4 and the LIVE/DEAD notebook use the default, `"1.6.4"`), so an older notebook keeps its results.
 
 ## Getting Started
 
@@ -125,7 +144,7 @@ Type (or paste) **one command at a time**, press **Enter**, and wait for it to f
    jupyter notebook
    ```
 
-10. **Open the notebook** `NucleoSeg3D_v1.6.4.ipynb`.
+10. **Open the notebook** `NucleoSeg3D_v1.6.41.ipynb` (or `NucleoSeg3D_LD_v1.2.2.ipynb` for LIVE/DEAD images).
 
 **Next time**, open PowerShell in the project folder and repeat only step 6 (activate) and step 9 (launch Jupyter).
 
@@ -180,7 +199,7 @@ Open the **Terminal** app (Applications → Utilities → Terminal).
    jupyter notebook
    ```
 
-10. **Open the notebook** `NucleoSeg3D_v1.6.4.ipynb`.
+10. **Open the notebook** `NucleoSeg3D_v1.6.41.ipynb` (or `NucleoSeg3D_LD_v1.2.2.ipynb` for LIVE/DEAD images).
 
 **Next time**, open Terminal in the project folder and repeat only step 6 (activate) and step 9 (launch Jupyter).
 
@@ -257,7 +276,7 @@ Open a terminal.
    jupyter notebook
    ```
 
-10. **Open the notebook** `NucleoSeg3D_v1.6.4.ipynb`.
+10. **Open the notebook** `NucleoSeg3D_v1.6.41.ipynb` (or `NucleoSeg3D_LD_v1.2.2.ipynb` for LIVE/DEAD images).
 
 **Next time**, open a terminal in the project folder and repeat only step 6 (activate) and step 9 (launch Jupyter).
 
@@ -289,7 +308,9 @@ On a server without a display (e.g. an HPC cluster over SSH), napari needs a vir
 - The first cell calls `load_nuclei_notebook_setup()` to import all required libraries in one step; the second calls `reload_helpers()` so edits to the helper file take effect without restarting the kernel.
 - Use Napari for interactive visualization at any step.
 - All processing logic lives in `helpers/notebook_helpers.py` — customize functions there rather than in the notebook.
-- The segmentation settings live in `helpers/optimal_settings_v1.6.4.json`. To change one, name it in `custom_settings` (Cell 4), e.g. `{"nuclei_edge_fraction": 0.3}`, and re-run from Cell 4; an unknown name raises an error listing the valid ones.
+- The segmentation settings live in `helpers/optimal_settings_v1.6.41.json` (v1.6.4 and LIVE/DEAD: `helpers/optimal_settings_v1.6.4.json`). To change one, name it in `custom_settings` (Cell 4), e.g. `{"nuclei_edge_fraction": 0.3}`, and re-run from Cell 4; an unknown name raises an error listing the valid ones. In v1.6.41 a setting named there is not changed by the histogram rules; in the LIVE/DEAD notebook a `scale_factor` named there is used as given.
+- **Optional processing steps:** to skip one of Cells 9–14, just don't run it and go on with the next one; to start over with other steps, re-run from Cell 8 (see [Detailed Workflow](#4-image-processing-and-segmentation-cells-9-22)).
+- **Checking the faster per-cell steps:** from the repository root, run `%run helpers/check_speedups.py` in a notebook cell (or `python helpers/check_speedups.py`). It runs the previous helpers (from git `HEAD`, or another commit given as argument) and the current ones on a synthetic image of touching nuclei, and prints SAME or DIFFERENT with both run times for every step. Run it before committing helper changes, since it compares against the last commit.
 
 ### 2D images
 2D images (a file without a Z stack, or a ROI with a single Z slice) are handled automatically; the image-loading cell (Cell 5) prints whether the image is 2D or 3D and sets `is_2d`.
@@ -301,6 +322,8 @@ On a server without a display (e.g. an HPC cluster over SSH), napari needs a vir
 - **Outputs:** every size is an area (`[um2]` columns, "area" in the summaries, plots and Excel report); the spatial plots show X and Y only; the VTK, STL, single-cell VTK and FEA exports are skipped.
 
 ## Detailed Workflow
+
+The cells of `NucleoSeg3D_v1.6.41.ipynb`; v1.6.4 has the same cells, without the steps marked v1.6.41. The LIVE/DEAD notebook follows the same order up to Cell 18, then makes the LIVE/DEAD call (see the notebook's introduction and the [LIVE/DEAD section](#livedead-notebook-v122-nucleoseg3d_ld_v122ipynb) above).
 
 ### 1. Import Libraries and Helpers (Cells 1-2)
 Cell 1 loads all required imports via `load_nuclei_notebook_setup()`. Cell 2 calls `reload_helpers()` to reload `helpers/notebook_helpers.py` without restarting the kernel.
@@ -314,7 +337,7 @@ Cell 1 loads all required imports via `load_nuclei_notebook_setup()`. Cell 2 cal
   - `multilabel`, `aggregate_distance_factor` (cells closer than this × `cell_diameter` form one aggregate), `pcm_thickness_factor` (PCM shell thickness = this × `cell_diameter`). Both are converted to µm, so they don't change with `scale_factor`.
 - **Cell 4 — Exports and segmentation settings**, used in single-file and batch mode:
   - `export_vtk`, `export_stl`, `export_fea` (3D exports, Cells 30, 31, 34).
-  - `custom_settings`: `{}` keeps all validated settings. `load_optimal_settings()` reads them from `helpers/optimal_settings_v1.6.4.json` into `opt`, which the later cells use. They include `scale_factor` / `zoom_factors` (resampling), `sigma` (Gaussian smoothing), `num_plateaus` / `plateau_factor` (histogram equalization), `threshold_method` and the threshold weights, the nuclei size refinement (`size_reference`, `iterative_split`, `oversize_factor`, `max_split_iterations`, `merge_undersized`, `undersize_factor`), splitting (`split_gamma`, `split_gamma_step`, `min_piece_fraction`, the watershed `nuclei_split_config_overrides`), and the NUCLEI steps added in v1.6.4 (`z_elongation`, `z_bg_radius_um`, `nuclei_flare_trim_factor`, `nuclei_saddle_dip`, `nuclei_edge_fraction`, `nuclei_rescue_contrast`, `z_atten_correction`, …).
+  - `custom_settings`: `{}` keeps all validated settings. `load_optimal_settings(custom_settings, version="1.6.41")` reads them from `helpers/optimal_settings_v1.6.41.json` (v1.6.4: `helpers/optimal_settings_v1.6.4.json`) into `opt`, which the later cells use. They include `scale_factor` / `zoom_factors` (resampling), `sigma` (Gaussian smoothing), `num_plateaus` / `plateau_factor` (histogram equalization), `threshold_method` and the threshold weights, the nuclei size refinement (`size_reference`, `iterative_split`, `oversize_factor`, `max_split_iterations`, `merge_undersized`, `undersize_factor`), splitting (`split_gamma`, `split_gamma_step`, `min_piece_fraction`, the watershed `nuclei_split_config_overrides`), and the NUCLEI steps added in v1.6.4 (`z_elongation`, `z_bg_radius_um`, `nuclei_flare_trim_factor`, `nuclei_saddle_dip`, `nuclei_edge_fraction`, `nuclei_rescue_contrast`, `z_atten_correction`, …). v1.6.41 adds `nuclei_gamma`, `resample_edge_mode`, the cell-body settings (`cyto_threshold`, `cyto_membrane_close_fraction`, `cyto_membrane_fill_area_factor`, `cyto_mask_close_um`, `cyto_fill_holes`, `cyto_split_by_intensity_gradient`, `cyto_grow_um`) and the histogram rules (`adapt_to_histograms`, `histogram_rules`).
 - **Cell 5 — Load image and stain table.**
   - Loads the image with `initialize_dataset()`, automatically choosing lazy (chunked) or eager reading from the file's size, and sets `is_2d` for a single-plane image. With `interactive_roi = True`, `select_roi_interactively()` first opens a napari window with a draggable ROI rectangle (X/Y only); with a saved stain table, its channels are named and colored after the table.
   - Prints the channel list (`print_channel_list()`). In batch mode nothing is loaded: the metadata of every image is read and any image whose channels differ from the first one is flagged.
@@ -324,15 +347,18 @@ Cell 1 loads all required imports via `load_nuclei_notebook_setup()`. Cell 2 cal
 ### 3. Preparation and Preview (Cells 7-8)
 - `prepare_and_preview()` builds the image stack and the `stain_df` table (channels not used in the stain table are dropped) and opens a napari viewer for channel inspection.
 - `prepare_stain_settings()` loads or creates per-channel contrast/gamma settings — reused from `<name_setup>_setup.csv` if it exists, otherwise set interactively in napari (starting from the calibrated suggestion, and checked against it), or picked automatically from the histogram if `automatic_contrast = 'calibrated'`.
-- `set_nuclei_contrast()` then sets the NUCLEI contrast/gamma from the channel's own histogram (the rule the settings were validated with), and Cell 8 shows the complete stain settings table for review (after the napari window is closed).
+- `adapt_to_histograms()` (v1.6.41) reads each channel's histogram (background, noise, signal-to-noise ratio, bright tail; `helpers/histogram_adapt.py`) and sets the settings that follow the image quality from it (`histogram_rules`: for now the nuclei edge fraction, from the NUCLEI signal-to-noise ratio). The features and the changes are printed and written to the histogram Excel file. Settings named in `custom_settings` are kept.
+- `set_nuclei_contrast()` then sets the NUCLEI contrast/gamma from the channel's own histogram (the rule the settings were validated with; v1.6.41: gamma `nuclei_gamma` 1.15), and Cell 8 shows the complete stain settings table for review (after the napari window is closed).
 - `adapt_to_image()` measures the typical nucleus in the NUCLEI channel and adapts `nuclei_diameter`, `scale_factor` and the µm sizes to it (3D images; the changes are printed and written to the histogram Excel file).
+- Cell 8 ends with `reset_processing_steps()`: the processing of Cells 9–14 starts again from the original image.
 
 ### 4. Image Processing and Segmentation (Cells 9-22)
-- **Preprocessing:** optional depth correction (`correct_depth()`, off in the validated settings), normalization (`run_normalize()`), isotropic resampling (`run_resample()`), median denoising (`run_denoise()`) followed by slice-by-slice removal of the NUCLEI out-of-focus haze (`remove_haze()`), contrast/gamma (`run_contrast_gamma()`), Gaussian smoothing (`run_smooth()`, `sigma`) and histogram equalization (`run_equalize()`, `num_plateaus` / `plateau_factor`); the values come from the validated settings (Cell 4).
+- **Preprocessing (Cells 9–14):** optional depth correction (`correct_depth()`, off in the validated settings), normalization (`run_normalize()`), isotropic resampling (`run_resample()`; v1.6.41 keeps the last Z slice, `resample_edge_mode`), median denoising (`run_denoise()`) followed by slice-by-slice removal of the NUCLEI out-of-focus haze (`remove_haze()`), contrast/gamma (`run_contrast_gamma()`), Gaussian smoothing (`run_smooth()`, `sigma`) and histogram equalization (`run_equalize()`, `num_plateaus` / `plateau_factor`); the values come from the validated settings (Cell 4).
+- **Optional steps:** each of Cells 9–14 can be skipped. Every step reads the most recent image computed before it (the original image is rescaled to 0–255 first, the range of the contrast settings and the threshold), and later steps that are now outdated are dropped. In Cell 15, `complete_skipped_steps()` lists the skipped steps and gives each one's stage the image of the stage before it, so the later cells find every stage they read. Without resampling, the zoom factors become 1 and the voxel size stays the original one. Skipping Cell 9 also skips the depth correction, skipping Cell 11 also skips the haze removal. Batch mode always runs every step.
 - **Thresholding (Cell 15):**
   - Marker channels: `run_threshold()` combines a selectable global method (`threshold_method`: Otsu / median / Huang), local Sauvola thresholding and a statistical-background component (blend weights `global_threshold_weight` / `sauvola_weight` from the validated settings). The histogram marks the global and final thresholds per channel. These masks decide marker positivity.
   - Cytoplasm: `segment_cytoplasm()` uses the **union of the stains** thresholded by `run_threshold()` — the CYTOPLASM channel and/or the intracellular markers, plus the membrane markers with their rings closed and filled (enclosed areas up to ~1.5 cell cross-sections, `build_cytoplasm_mask()`) — and assigns exactly these voxels to the nuclei, without any growth (a cell with no stained cytoplasm keeps just its nucleus). Cells are only grown from the nuclei when there is no CYTOPLASM channel and no ticked marker at all.
-- **Histogram export:** `export_channel_histograms()` saves every stage's histograms and a Parameters sheet (including the splitting settings) to Excel.
+- **Histogram export:** `export_channel_histograms()` saves the histograms of every stage that was run and a Parameters sheet (including the splitting settings, the skipped steps and, v1.6.41, the histogram features and rules) to Excel.
 - **Nuclei:** `segment_nuclei()` with watershed (default), StarDist (`trig_stardist`) or Cellpose (`trig_cellpose`). Splitting is automatic — there is no split profile to choose:
   - the watershed first pass uses a fixed built-in configuration: it also splits touching nuclei where the nuclear signal dips between them, and always splits a nucleus whose z-slices show separate islands (e.g. two lobes above and below its centre);
   - with `split_gamma` > 1 the nuclear intensity used by the watershed (and by the seam test of the fragment merge) is gamma-adjusted first (`apply_split_gamma()`), so the dips between touching nuclei are deeper; Cellpose/StarDist get the original image;
@@ -341,9 +367,9 @@ Cell 1 loads all required imports via `load_nuclei_notebook_setup()`. Cell 2 cal
   - after the size refinement (v1.6.4, 3D NUCLEI channel): Z flares are trimmed, labels holding several nuclei are split at an intensity saddle, nuclei stacked in Z are split by size, nuclei the threshold missed are added back, and every nucleus edge is redrawn at `nuclei_edge_fraction` of its own peak. The recap table gives each nucleus's final label.
   - All these settings come from `segmentation_settings(opt)` (Cell 4).
   - On a 2D image the same steps run in the image plane (see [2D images](#2d-images)).
-- **Cytoplasm / PCM:** `segment_cytoplasm()` builds the cytoplasm from the CYTOPLASM channel (optionally shaped with Cellpose, `trig_cellpose_cyto = True`), otherwise from the intracellular markers, otherwise by growing the nuclei; touching cells are split where the marker signal fades and where a membrane marker is bright — on intensities gamma-adjusted with `split_gamma`, so the borders between cells are more distinct. `segment_pcm()` adds the pericellular matrix shell, `pcm_thickness_factor` × `cell_diameter` µm thick.
+- **Cytoplasm / PCM:** `segment_cytoplasm()` builds the cytoplasm from the CYTOPLASM channel (optionally shaped with Cellpose, `trig_cellpose_cyto = True`), otherwise from the intracellular markers, otherwise by growing the nuclei; touching cells are split where the marker signal fades and where a membrane marker is bright — on intensities gamma-adjusted with `split_gamma`, so the borders between cells are more distinct. v1.6.41 (`cytoplasm_settings(opt)`): the cytoplasm / membrane stains get their own threshold (`cyto_threshold`), the membrane rings are closed and filled with tuned sizes, small gaps in the mask are closed (`cyto_mask_close_um`), and every cell is completed by the dim rim of its body below the stain threshold, up to `cyto_grow_um` µm without overlapping its neighbours. `segment_pcm()` adds the pericellular matrix shell, `pcm_thickness_factor` × `cell_diameter` µm thick.
 - **Label assignment and aggregates:** `assign_channel_labels()` links cells to marker channels; `detect_aggregates()` groups cells closer than `aggregate_distance_factor` × `cell_diameter` µm into aggregates.
-- **Visualization:** `view_processing_results()` opens napari viewers with every stage and the segmentation, including "Thresh islands" layers to check the threshold masks.
+- **Visualization:** `view_processing_results()` opens napari viewers with the original image, every processing step that was run (the last one, the thresholded image, starts visible) and the segmentation, including "Thresh islands" layers to check the threshold masks.
 
 ### 5. Quantification and Analysis (Cells 23-29)
 Marker intensity is reported both for **positive cells** (cells that passed that marker's threshold) and for **all cells**. Sizes are volumes, or areas for a 2D image.
@@ -358,6 +384,37 @@ Each 3D export can be switched off in Cell 4 (`export_vtk`, `export_stl`, `expor
 - **3D meshes (3D images only):** VTK volumes (`build_vtk_volumes()`) and per-marker STL meshes (`export_marker_stl()`) for ParaView or similar. Set `export_nuc_3D_vtk = True` in Cell 32 itself to also export a single cell as a VTK sub-volume.
 - **Excel:** full quantification tables, stain settings and processing parameters (`export_quantification_to_excel()`, saved as `<file>_segmentation.xlsx`), with areas instead of volumes for a 2D image.
 - **FEA (3D images only):** Abaqus `.inp` mesh via tetrahedralization (`export_fea_mesh()`, using `tetgen`), saved as `<file>_FEA.inp`: node coordinates in µm (X, Y, Z), one element set per nucleus (`cell1`, `cell2`, …).
+
+## Validation
+
+The segmentation settings were tuned against manually annotated 3D images (the ground truths). The scores and the tuning records are stored with the settings, in `helpers/optimal_settings_v<version>.json`. The tuning scripts and ground-truth images are not part of this repository.
+
+**Score.** Nuclei are matched to the annotation by overlap (IoU). F1@0.5 counts a nucleus as found when it overlaps its annotation by IoU ≥ 0.5; mean F1 averages the F1 over IoU 0.5–0.75, so it also rewards accurate outlines.
+
+### v1.6.41 (`optimal_settings_v1.6.41.json`)
+
+Six ground truths, each scored **as a new image**: calibrated NUCLEI contrast, nucleus size measured in the image and edge fraction from its own NUCLEI histogram.
+
+| Image | Mean F1 | F1@0.5 | Mean F1, previous tuning round |
+| --- | --- | --- | --- |
+| EB-019_M1_CUBE_S1_20x | 0.300 | 0.655 | 0.304 |
+| AGG-CADHERIN-INTEGRIN_002 | 0.605 | 0.805 | 0.580 |
+| 10%GelMA_hAC_integrin_005 | 0.565 | 0.771 | 0.391 |
+| AGG-CADHERIN-INTEGRIN_005 | 0.649 | 0.829 | 0.418 |
+| AGG-CADHERIN-INTEGRIN_003 | 0.608 | 0.706 | 0.440 |
+| nCadherin_002 | 0.629 | 0.829 | 0.465 |
+| **All** | **0.559** | **0.766** | **0.433** |
+
+The last column is the previous internal tuning round (no histogram rule, one shared edge fraction) on the same six images, scored the same way.
+
+- **Histogram rule** (nuclei edge fraction from the NUCLEI signal-to-noise ratio): checked leave-one-image-out, i.e. fitted on five images and scored on the sixth. Mean F1 0.552 with the rule, against 0.540 for the best single shared edge fraction. Other candidate rules (NUCLEI gamma, rescue contrast, cell-body threshold and growth) did not beat one shared value and were left out.
+- **Cell bodies**: scored against Cellpose (cyto3) cell bodies of the annotated nuclei, as mean cell IoU: 0.556 over the six images with the v1.6.41 cell-body settings (0.477–0.652 per image). These are not manual annotations of the cell bodies, so they measure agreement with Cellpose rather than accuracy.
+
+### v1.6.4 (`optimal_settings_v1.6.4.json`)
+
+Four ground truths: mean F1 0.509, F1@0.5 0.736. These scores used each image's own contrast and edge fraction, so they are not directly comparable with the v1.6.41 scores, where every image is treated as new.
+
+The LIVE/DEAD notebook uses the v1.6.4 settings. Its call (`min_positive_fraction`, `ld_rule`) and bright-signal filter have not been validated against annotations.
 
 ## Requirements
 See `requirements.txt` for the full list. Key dependencies:

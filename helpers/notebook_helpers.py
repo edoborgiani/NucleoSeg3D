@@ -2546,17 +2546,20 @@ def _compute_automatic_contrast_limits(im_view, method="legacy"):
     return cont_min, cont_max
 
 
-def calibrated_contrast(im_channel):
+def calibrated_contrast(im_channel, gamma=1.0):
     """v1.6.4: ``{"Cont_min", "Cont_max", "Gamma"}`` of one channel (Z, Y, X)
     from its own histogram, with the ``'calibrated'`` rule of
-    `_compute_automatic_contrast_limits` (Gamma 1.0), on the same 0-255
-    min-max scale as the stain table. Used for the NUCLEI channel of an image
-    the tuned settings were not tuned on: its Cont_min lands at the
-    background, where the tuned values sat on all four ground truths (within
-    1-3 grey levels); gamma 0.8-1.25 changed the score by < 0.02."""
+    `_compute_automatic_contrast_limits`, on the same 0-255 min-max scale as
+    the stain table. Used for the NUCLEI channel of an image the tuned
+    settings were not tuned on: its Cont_min lands at the background, where
+    the tuned values sat on all four ground truths (within 1-3 grey levels).
+
+    v1.6.41: ``gamma`` (default 1.0 = v1.6.4). On the calibrated window, gamma
+    1.15 scored better than 1.0 on all four ground truths treated as new
+    images (mean F1 0.407 vs 0.385; the optimal settings v1.6.41 use it)."""
     lo, hi = _compute_automatic_contrast_limits(_normalize_channel_to_uint8_view(im_channel),
                                                 method="calibrated")
-    return {"Cont_min": int(lo), "Cont_max": int(hi), "Gamma": 1.0}
+    return {"Cont_min": int(lo), "Cont_max": int(hi), "Gamma": float(gamma)}
 
 
 def suggest_contrast_settings(im_in, stain_complete_df, current=None, warn_noise=1.0):
@@ -6457,8 +6460,9 @@ def run_normalize(im_final_stack, stain_complete_df):
     return im_final_stack
 
 
-def run_resample(im_final_stack, stain_complete_df, zoom_factors, meta):
-    """Resample to isotropic voxel spacing and display histogram.
+def run_resample(im_final_stack, stain_complete_df, zoom_factors, meta, edge_mode="constant"):
+    """Resample to isotropic voxel spacing and display histogram
+    (``edge_mode``: see `resample_to_isotropic`).
 
     Returns
     -------
@@ -6466,7 +6470,8 @@ def run_resample(im_final_stack, stain_complete_df, zoom_factors, meta):
     r_zX, r_zY, r_zZ : float  —  isotropic voxel sizes in µm
     """
     source, img = _stage_input(im_final_stack, 'Zoomed image')
-    zoomed, r_zX, r_zY, r_zZ = resample_to_isotropic(img, zoom_factors, meta=meta)
+    zoomed, r_zX, r_zY, r_zZ = resample_to_isotropic(img, zoom_factors, meta=meta,
+                                                     edge_mode=edge_mode)
     _store_stage(im_final_stack, 'Zoomed image', zoomed)
     # 'Normalized image' is not used past this point; drop it to free RAM
     # before the (larger, isotropic) downstream stages accumulate.
@@ -6986,9 +6991,16 @@ def trim_flared_slices(labels, factor):
     return out
 
 
-def resample_to_isotropic(image_stack, zoom_factors, meta=None):
+def resample_to_isotropic(image_stack, zoom_factors, meta=None, edge_mode="constant"):
     """
     Resample image stack to isotropic voxel spacing.
+
+    v1.6.41, ``edge_mode``: how `scipy.ndimage.zoom` samples past the last
+    voxel. ``"constant"`` (default, as in v1.6.4) fills with 0, and
+    because the last output plane maps a rounding error past the last input
+    plane, the last Z slice (and the last row / column) came out empty
+    whenever the stack was shrunk: the nuclei at the bottom of the stack were
+    lost. ``"nearest"`` (the optimal settings v1.6.41) repeats the edge voxel.
     
     Parameters
     ----------
@@ -7020,7 +7032,8 @@ def resample_to_isotropic(image_stack, zoom_factors, meta=None):
     im_out = np.zeros(new_shape, dtype=image_stack.dtype)
     
     for c in range(image_stack.shape[3]):
-        resampled = scipy_zoom(image_stack[:, :, :, c], zoom=zoom_factors, order=1)
+        resampled = scipy_zoom(image_stack[:, :, :, c], zoom=zoom_factors, order=1,
+                               mode=edge_mode)
         resampled = resampled - np.min(resampled)
         normalized = (resampled - resampled.min()) / (resampled.max() - resampled.min() + 1e-8) * 255
         im_out[:, :, :, c] = np.clip(normalized, 0, 255).astype('uint8')
@@ -7674,6 +7687,36 @@ def _cytoplasm_stain_channels(stain_complete_df, n_channels, cyto_markers, membr
         elif idx == 'CYTOPLASM' or marker in cyto_markers:
             intra.append(c)
     return intra, memb
+
+
+def _rethreshold_cytoplasm_channels(equalized, stain_complete_df, channels, nuclei_diameter,
+                                    cell_diameter, r_zxyz, settings):
+    """'Threshold image'-like mask (Z, Y, X, C) in which only *channels* (the
+    cytoplasm / membrane stains) are thresholded, with their own settings
+    (``segment_cytoplasm(cyto_threshold=...)``); the other channels are empty."""
+    import contextlib
+    import io
+    import matplotlib.pyplot as plt
+    s = dict(settings)
+    method = s.get("threshold_method", "otsu")
+    g = float(s.get("global_threshold_weight", 0.15))
+    w = float(s.get("sauvola_weight", 0.60))
+    w = min(w, 1.0 - g)
+    window = float(s.get("window_um") or cell_diameter)
+    n_fig = len(plt.get_fignums())
+    with contextlib.redirect_stdout(io.StringIO()):
+        sub = apply_threshold_per_channel(
+            np.asarray(equalized)[..., channels], stain_complete_df.iloc[channels],
+            nuclei_diameter, window, r_zxyz, threshold_method=method,
+            global_threshold_weight=g, sauvola_weight=w)
+    for num in plt.get_fignums()[n_fig:]:
+        plt.close(num)
+    out = np.zeros(np.asarray(equalized).shape, dtype=bool)
+    out[..., channels] = sub > 0
+    names = ", ".join(str(stain_complete_df.iloc[c]["Marker"]) for c in channels)
+    print(f"Cytoplasm stains thresholded with their own settings ({names}): {method}, global "
+          f"weight {g:.2f}, Sauvola weight {w:.2f}, window {window:.1f} um")
+    return out
 
 
 def build_cytoplasm_mask(threshold_img, intra_channels, membrane_channels, max_cell_area,
@@ -10063,6 +10106,57 @@ def detect_aggregates(im_segmentation_stack, stain_df, cell_diameter, r_zxyz,
     return im_segmentation_stack
 
 
+
+
+# ── Cell-body completion (v1.6.41, tuned on Cellpose cell bodies) ─────────────
+# The stain mask alone leaves the dim parts of a cell body out (~22-42% of
+# the Cellpose cell volume on the validation images): these optional steps of
+# `segment_cytoplasm` give them back. All off by default (results of v1.6.4).
+
+def close_mask_xy(mask, radius_px):
+    """Binary closing in each XY slice (disk of ``radius_px``): bridges the
+    small dim gaps of the stain inside a cell."""
+    from skimage.morphology import disk
+    r = int(round(radius_px))
+    if r < 1:
+        return mask
+    se = disk(r)
+    out = np.empty_like(mask)
+    for z in range(mask.shape[0]):
+        out[z] = ndi.binary_closing(mask[z], structure=se, border_value=0) | mask[z]
+    return out
+
+
+def fill_cell_holes(cells):
+    """Give every cell the empty holes it encloses in each XY slice."""
+    cells = cells.copy()
+    for k, sl in enumerate(ndi.find_objects(cells), start=1):
+        if sl is None:
+            continue
+        sub = cells[sl]
+        for z in range(sub.shape[0]):
+            own = sub[z] == k
+            if own.any():
+                holes = ndi.binary_fill_holes(own) & (sub[z] == 0)
+                sub[z][holes] = k
+    return cells
+
+
+def grow_cells_xy(cells, distance_px):
+    """Grow every cell by ``distance_px`` into the empty voxels, in each XY
+    slice, without overlapping its neighbours (``expand_labels``).
+
+    A growth below one pixel (but above zero) grows by one pixel: with a coarse
+    XY voxel the requested growth in um would otherwise silently do nothing
+    (e.g. 0.62 um on 0.66 um pixels: EB-019 mean cell IoU 0.330 instead of 0.473)."""
+    from skimage.segmentation import expand_labels
+    if distance_px <= 0:
+        return cells
+    distance_px = max(float(distance_px), 1.0)
+    return np.stack([expand_labels(cells[z], distance=distance_px)
+                     for z in range(cells.shape[0])])
+
+
 def _gradient_watershed_elevation(
     intensity_imgs,
     combined_mask,
@@ -10192,6 +10286,12 @@ def segment_cytoplasm(
     drop_bare_cells=True,
     progress=None,
     split_gamma=1.0,
+    cyto_threshold=None,
+    membrane_close_fraction=0.03,
+    membrane_fill_area_factor=1.5,
+    mask_close_um=0.0,
+    fill_holes_in_cells=False,
+    grow_um=0.0,
 ):
     """
     Segment the cytoplasm, one cell per nucleus.
@@ -10272,6 +10372,25 @@ def segment_cytoplasm(
         surroundings, so the border is more distinct. Only the split uses
         it, not the cytoplasm mask. Default 1.0 = off (nuclei notebook
         v1.6.3 setting).
+    cyto_threshold : dict, optional
+        Threshold the cytoplasm / membrane channels again, with their own
+        settings, from the 'Equalized image' (keys ``threshold_method``,
+        ``global_threshold_weight``, ``sauvola_weight``, ``window_um`` = the
+        Sauvola window, the cell diameter in Cell 15). Default None: the
+        'Threshold image' of Cell 15, shared with the nuclei.
+    membrane_close_fraction, membrane_fill_area_factor : float
+        Membrane rings: gaps closed over this fraction of a cell diameter
+        (0.03) and holes filled up to this many cell areas (1.5).
+    mask_close_um : float
+        Close the cytoplasm mask in each XY slice over this radius (um), so
+        dim gaps inside a cell are kept. Default 0 = off.
+    fill_holes_in_cells : bool
+        Give every cell the holes it encloses in each XY slice. Default off.
+    grow_um : float
+        Grow every cell by this distance (um) in each XY slice, without
+        overlapping its neighbours: the dim rim of the cell body below the
+        stain threshold. Default 0 = off. (v1.6.41 settings: tuned on Cellpose
+        cell bodies of the manual nuclei, ``validation/tune_cyto.py``.)
 
     Returns
     -------
@@ -10317,12 +10436,19 @@ def segment_cytoplasm(
     elif from_stains:
         diameter = cell_diameter if cell_diameter is not None else cyto_factor * nuclei_diameter
         cell_px = diameter / float(np.mean([r_zX, r_zY]))
+        if cyto_threshold:
+            im_in = _rethreshold_cytoplasm_channels(
+                im_final_stack['Equalized image'], stain_complete_df,
+                sorted(set(intra_channels) | set(membrane_channels)), nuclei_diameter,
+                diameter, (r_zX, r_zY, r_zZ), cyto_threshold)
         cyto_mask = build_cytoplasm_mask(
             im_in, intra_channels, membrane_channels,
-            max_cell_area=1.5 * np.pi * (cell_px / 2) ** 2,
+            max_cell_area=membrane_fill_area_factor * np.pi * (cell_px / 2) ** 2,
             # Membrane gaps closed over 3% of a cell diameter, in voxels.
-            close_radius=max(1, int(round(0.03 * cell_px))),
+            close_radius=max(1, int(round(membrane_close_fraction * cell_px))),
         )
+        if mask_close_um > 0:
+            cyto_mask = close_mask_xy(cyto_mask, mask_close_um / float(np.mean([r_zX, r_zY])))
         combined_mask = cyto_mask | (nuclei_labels > 0)
         if split_by_intensity_gradient:
             filt = im_final_stack['Filtered image']
@@ -10345,6 +10471,17 @@ def segment_cytoplasm(
                 combined_mask, sampling=[r_zZ, r_zY, r_zX]
             )
         im_out = watershed(elevation, nuclei_labels, mask=combined_mask)
+        if fill_holes_in_cells:
+            im_out = fill_cell_holes(np.asarray(im_out, dtype=np.int32))
+        if grow_um > 0:
+            im_out = grow_cells_xy(np.asarray(im_out, dtype=np.int32),
+                                   grow_um / float(np.mean([r_zX, r_zY])))
+        completion = [f"{k} {v:g}" for k, v in (("mask closed over um", mask_close_um),
+                                                 ("cells grown by um", grow_um)) if v > 0]
+        if fill_holes_in_cells:
+            completion.append("holes in cells filled")
+        if completion:
+            print("Cell bodies completed: " + ", ".join(completion))
 
         def _names(channels):
             return ', '.join(str(stain_complete_df.loc[channel_index[c], 'Marker']) for c in channels)
@@ -10357,7 +10494,7 @@ def segment_cytoplasm(
         print(f"Cytoplasm = union of the thresholded stains ({'; '.join(parts)}) - "
               f"{100 * cyto_mask.mean():.1f}% of the volume - assigned to the nuclei "
               f"({'gradient-aware' if split_by_intensity_gradient else 'nearest-nucleus'} "
-              "watershed), no growth")
+              f"watershed), {f'cells grown by {grow_um:g} um' if grow_um > 0 else 'no growth'}")
         del cyto_mask, combined_mask, elevation
 
     else:
@@ -11791,7 +11928,18 @@ BATCH_NUCLEI_OPTIONS = {
     # v1.6.4: "calibrated" = NUCLEI contrast of every image from its own
     # histogram (`calibrated_contrast`), whatever the setup / automatic_contrast
     "nuclei_contrast": None,
+    "nuclei_gamma": 1.0,  # v1.6.41: Gamma of the calibrated NUCLEI contrast
+    "resample_edge_mode": "constant",  # v1.6.41: "nearest" keeps the last Z slice (resample_to_isotropic)
+    # v1.6.41: {setting: rule} of settings that follow each image's channel
+    # histograms (helpers/histogram_adapt.py); None = off
+    "histogram_rules": None,
 }
+# v1.6.41: names of the optimal settings (histogram rules) in cyto_split_config
+_BATCH_CYTO_RULE_KEYS = {
+    "cyto_grow_um": "grow_um", "cyto_mask_close_um": "mask_close_um",
+    "cyto_membrane_close_fraction": "membrane_close_fraction",
+    "cyto_membrane_fill_area_factor": "membrane_fill_area_factor",
+    "cyto_threshold": "cyto_threshold"}
 _BATCH_SEGMENT_NUCLEI_KEYS = (
     "z_elongation", "nuclei_expand_um", "nuclei_flare_trim_factor", "nuclei_saddle_dip",
     "nuclei_edge_fraction", "nuclei_edge_margin_um", "nuclei_tall_volume_factor",
@@ -11893,12 +12041,27 @@ def _process_single_image_batch(
     )
     if opts["nuclei_contrast"] == "calibrated" and "NUCLEI" in stain_complete_df.index:  # v1.6.4
         nuc_contrast = calibrated_contrast(
-            im_final_stack['Original image'][..., stain_complete_df.index.get_loc("NUCLEI")])
+            im_final_stack['Original image'][..., stain_complete_df.index.get_loc("NUCLEI")],
+            gamma=opts["nuclei_gamma"])
         for col, value in nuc_contrast.items():
             stain_complete_df.loc["NUCLEI", col] = value
             original_stain_complete_df.loc["NUCLEI", col] = value
     elif opts["nuclei_contrast"] not in (None, "calibrated"):
         raise ValueError("nuclei_options['nuclei_contrast'] must be None or 'calibrated'")
+    histogram_note = "off"
+    if opts["histogram_rules"]:  # v1.6.41: settings from this image's channel histograms
+        from helpers.histogram_adapt import adapt_settings, features_by_condition
+        feats = features_by_condition(im_final_stack['Original image'], stain_complete_df)
+        cyto_split_config = dict(cyto_split_config or get_cyto_split_config(profile="balanced"))
+        nuc_rules = {k: r for k, r in opts["histogram_rules"].items() if k in opts}
+        changes = adapt_settings(opts, nuc_rules, feats)
+        cyto_rules = {}
+        for k, r in opts["histogram_rules"].items():
+            head, dot, rest = k.partition(".")
+            if head in _BATCH_CYTO_RULE_KEYS:
+                cyto_rules[_BATCH_CYTO_RULE_KEYS[head] + dot + rest] = r
+        changes += adapt_settings(cyto_split_config, cyto_rules, feats)
+        histogram_note = "; ".join(f"{n} {o} -> {v} ({s})" for n, o, v, s in changes) or "no change"
     adapted_note = "off"
     if opts["auto_adapt"] and not is_2d and "NUCLEI" in stain_complete_df.index:  # v1.6.4
         adapted, changes = adapt_settings_to_image(
@@ -11931,6 +12094,7 @@ def _process_single_image_batch(
     im_final_stack = run_normalize(im_final_stack, stain_complete_df=stain_complete_df)
     im_final_stack, r_zX, r_zY, r_zZ = run_resample(
         im_final_stack, stain_complete_df=stain_complete_df, zoom_factors=zooms, meta=meta,
+        edge_mode=opts["resample_edge_mode"],
     )
     im_final_stack = run_denoise(im_final_stack, stain_complete_df=stain_complete_df)
     if opts["z_bg_radius_um"] > 0 and im_final_stack['Denoised image'].shape[0] > 1 \
@@ -11981,6 +12145,7 @@ def _process_single_image_batch(
             'Min split piece fraction': min_piece_fraction,
             **{f"Nuclei option {k}": v for k, v in opts.items()},
             'Settings adapted to the image (v1.6.4)': adapted_note,
+            'Settings adapted to the histograms (v1.6.41)': histogram_note,
         },
     )
 
