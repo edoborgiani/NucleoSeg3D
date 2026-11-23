@@ -397,12 +397,12 @@ Six ground truths, each scored **as a new image**: calibrated NUCLEI contrast, n
 
 | Image | Mean F1 | F1@0.5 | Mean F1, previous tuning round |
 | --- | --- | --- | --- |
-| EB-019_M1_CUBE_S1_20x | 0.300 | 0.655 | 0.304 |
-| AGG-CADHERIN-INTEGRIN_002 | 0.605 | 0.805 | 0.580 |
-| 10%GelMA_hAC_integrin_005 | 0.565 | 0.771 | 0.391 |
-| AGG-CADHERIN-INTEGRIN_005 | 0.649 | 0.829 | 0.418 |
-| AGG-CADHERIN-INTEGRIN_003 | 0.608 | 0.706 | 0.440 |
-| nCadherin_002 | 0.629 | 0.829 | 0.465 |
+| GT1 | 0.300 | 0.655 | 0.304 |
+| GT2 | 0.605 | 0.805 | 0.580 |
+| GT3 | 0.565 | 0.771 | 0.391 |
+| GT4 | 0.649 | 0.829 | 0.418 |
+| GT5 | 0.608 | 0.706 | 0.440 |
+| GT6 | 0.629 | 0.829 | 0.465 |
 | **All** | **0.559** | **0.766** | **0.433** |
 
 The last column is the previous internal tuning round (no histogram rule, one shared edge fraction) on the same six images, scored the same way.

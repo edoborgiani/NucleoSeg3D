@@ -1,14 +1,14 @@
 {
   "version": "1.6.41",
-  "description": "Settings of NucleoSeg3D v1.6.41: the nuclei and cell-body settings of the last tuning round (labelled v1.7.5 in the validation records below) + nuclei edge fraction adapted to each image's NUCLEI histogram (signal-to-noise ratio), fitted and checked leave-one-image-out on six manual ground truths (two new: AGG-CADHERIN-INTEGRIN_003, nCadherin_002). Cell-body settings re-checked on six images; no histogram rule helped. The v1.7.x labels in the validation records are internal tuning rounds, not released versions.",
+  "description": "Settings of NucleoSeg3D v1.6.41: the nuclei and cell-body settings of the last tuning round (labelled v1.7.5 in the validation records below) + nuclei edge fraction adapted to each image's NUCLEI histogram (signal-to-noise ratio), fitted and checked leave-one-image-out on six manual ground truths (two new: GT5, GT6). Cell-body settings re-checked on six images; no histogram rule helped. The v1.7.x labels in the validation records are internal tuning rounds, not released versions.",
   "source": "validation_tuning/v176 (sweep/, rules/, check_rule/, sweep_cyto/, rules_cyto/)",
   "ground_truths": [
-    "EB-019_M1_CUBE_S1_20x",
-    "AGG-CADHERIN-INTEGRIN_002",
-    "10%GelMA_hAC_integrin_005",
-    "AGG-CADHERIN-INTEGRIN_005",
-    "AGG-CADHERIN-INTEGRIN_003",
-    "nCadherin_002"
+    "GT1",
+    "GT2",
+    "GT3",
+    "GT4",
+    "GT5",
+    "GT6"
   ],
   "validation": {
     "objective": "mean F1 over IoU 0.5-0.75 (whole crop)",
@@ -17,7 +17,7 @@
       "f1_50": 0.766
     },
     "per_image": {
-      "EB-019_M1_CUBE_S1_20x": {
+      "GT1": {
         "mean_f1": 0.3,
         "f1_50": 0.655,
         "nuclei_edge_fraction": 0.207,
@@ -25,7 +25,7 @@
         "fp": 59,
         "fn": 81
       },
-      "AGG-CADHERIN-INTEGRIN_002": {
+      "GT2": {
         "mean_f1": 0.605,
         "f1_50": 0.805,
         "nuclei_edge_fraction": 0.324,
@@ -33,7 +33,7 @@
         "fp": 7,
         "fn": 27
       },
-      "10%GelMA_hAC_integrin_005": {
+      "GT3": {
         "mean_f1": 0.565,
         "f1_50": 0.771,
         "nuclei_edge_fraction": 0.359,
@@ -41,7 +41,7 @@
         "fp": 16,
         "fn": 51
       },
-      "AGG-CADHERIN-INTEGRIN_005": {
+      "GT4": {
         "mean_f1": 0.649,
         "f1_50": 0.829,
         "nuclei_edge_fraction": 0.349,
@@ -49,7 +49,7 @@
         "fp": 12,
         "fn": 33
       },
-      "AGG-CADHERIN-INTEGRIN_003": {
+      "GT5": {
         "mean_f1": 0.608,
         "f1_50": 0.706,
         "nuclei_edge_fraction": 0.32,
@@ -57,7 +57,7 @@
         "fp": 13,
         "fn": 42
       },
-      "nCadherin_002": {
+      "GT6": {
         "mean_f1": 0.629,
         "f1_50": 0.829,
         "nuclei_edge_fraction": 0.351,
@@ -71,27 +71,27 @@
       "mean_f1": 0.433,
       "f1_50": 0.685,
       "per_image": {
-        "EB-019_M1_CUBE_S1_20x": {
+        "GT1": {
           "mean_f1": 0.304,
           "f1_50": 0.655
         },
-        "AGG-CADHERIN-INTEGRIN_002": {
+        "GT2": {
           "mean_f1": 0.58,
           "f1_50": 0.759
         },
-        "10%GelMA_hAC_integrin_005": {
+        "GT3": {
           "mean_f1": 0.391,
           "f1_50": 0.608
         },
-        "AGG-CADHERIN-INTEGRIN_005": {
+        "GT4": {
           "mean_f1": 0.418,
           "f1_50": 0.692
         },
-        "AGG-CADHERIN-INTEGRIN_003": {
+        "GT5": {
           "mean_f1": 0.44,
           "f1_50": 0.652
         },
-        "nCadherin_002": {
+        "GT6": {
           "mean_f1": 0.465,
           "f1_50": 0.742
         }
@@ -103,32 +103,32 @@
       "mean_f1_shared": 0.54,
       "mean_f1_v1.7.5": 0.433,
       "per_image": {
-        "EB-019_M1_CUBE_S1_20x": {
+        "GT1": {
           "rule": 0.303,
           "shared": 0.243,
           "v1.7.5": 0.304
         },
-        "AGG-CADHERIN-INTEGRIN_002": {
+        "GT2": {
           "rule": 0.588,
           "shared": 0.585,
           "v1.7.5": 0.581
         },
-        "10%GelMA_hAC_integrin_005": {
+        "GT3": {
           "rule": 0.559,
           "shared": 0.555,
           "v1.7.5": 0.391
         },
-        "AGG-CADHERIN-INTEGRIN_005": {
+        "GT4": {
           "rule": 0.639,
           "shared": 0.625,
           "v1.7.5": 0.418
         },
-        "AGG-CADHERIN-INTEGRIN_003": {
+        "GT5": {
           "rule": 0.601,
           "shared": 0.604,
           "v1.7.5": 0.44
         },
-        "nCadherin_002": {
+        "GT6": {
           "rule": 0.624,
           "shared": 0.63,
           "v1.7.5": 0.465
@@ -137,7 +137,7 @@
     }
   },
   "histogram_rules_evidence": {
-    "nuclei_edge_fraction": "best edge fraction per image vs log10(NUCLEI snr): r 0.85; the three ground truths painted to the painting rule (EB-019 snr 9 -> 0.21, AGG_002 53 -> 0.28, nCadherin_002 79 -> 0.33) follow it, so it is the image (noise), not only the painting.",
+    "nuclei_edge_fraction": "best edge fraction per image vs log10(NUCLEI snr): r 0.85; the three ground truths painted to the painting rule (GT1 snr 9 -> 0.21, GT2 53 -> 0.28, GT6 79 -> 0.33) follow it, so it is the image (noise), not only the painting.",
     "not_adapted": "nuclei_gamma, nuclei_rescue_contrast (no rule beat one shared value leave-one-image-out); cyto threshold weights and cyto_grow_um (rules gained <= 0.002 mean cell IoU and lost up to 0.009 on some image; per-image optimum only +0.006 over shared)."
   },
   "changes": {
@@ -158,28 +158,28 @@
     "v1.7.3_mean_cell_iou": 0.4405,
     "v1.7.4_mean_cell_iou": 0.5151,
     "per_image": {
-      "AGG-CADHERIN-INTEGRIN_005": {
+      "GT4": {
         "mean_cell_iou": 0.577,
         "cells_mean_f1": 0.475,
         "cells_f1_50": 0.648,
         "cyto_mean_f1": 0.405,
         "cells_without_predicted_cell": 0
       },
-      "EB-019_M1_CUBE_S1_20x": {
+      "GT1": {
         "mean_cell_iou": 0.477,
         "cells_mean_f1": 0.227,
         "cells_f1_50": 0.472,
         "cyto_mean_f1": 0.056,
         "cells_without_predicted_cell": 0
       },
-      "AGG-CADHERIN-INTEGRIN_002": {
+      "GT2": {
         "mean_cell_iou": 0.548,
         "cells_mean_f1": 0.452,
         "cells_f1_50": 0.608,
         "cyto_mean_f1": 0.309,
         "cells_without_predicted_cell": 0
       },
-      "10%GelMA_hAC_integrin_005": {
+      "GT3": {
         "mean_cell_iou": 0.458,
         "cells_mean_f1": 0.191,
         "cells_f1_50": 0.427,
@@ -195,19 +195,19 @@
         "cells_f1_50": 0.458,
         "cyto_mean_f1": 0.17,
         "per_image": {
-          "AGG-CADHERIN-INTEGRIN_005": {
+          "GT4": {
             "mean_cell_iou": 0.521,
             "cells_mean_f1": 0.426
           },
-          "EB-019_M1_CUBE_S1_20x": {
+          "GT1": {
             "mean_cell_iou": 0.295,
             "cells_mean_f1": 0.114
           },
-          "AGG-CADHERIN-INTEGRIN_002": {
+          "GT2": {
             "mean_cell_iou": 0.46,
             "cells_mean_f1": 0.395
           },
-          "10%GelMA_hAC_integrin_005": {
+          "GT3": {
             "mean_cell_iou": 0.355,
             "cells_mean_f1": 0.151
           }
@@ -219,19 +219,19 @@
         "cells_f1_50": 0.548,
         "cyto_mean_f1": 0.21,
         "per_image": {
-          "AGG-CADHERIN-INTEGRIN_005": {
+          "GT4": {
             "mean_cell_iou": 0.553,
             "cells_mean_f1": 0.527
           },
-          "EB-019_M1_CUBE_S1_20x": {
+          "GT1": {
             "mean_cell_iou": 0.391,
             "cells_mean_f1": 0.166
           },
-          "AGG-CADHERIN-INTEGRIN_002": {
+          "GT2": {
             "mean_cell_iou": 0.464,
             "cells_mean_f1": 0.433
           },
-          "10%GelMA_hAC_integrin_005": {
+          "GT3": {
             "mean_cell_iou": 0.423,
             "cells_mean_f1": 0.267
           }
@@ -239,40 +239,40 @@
       }
     },
     "six_image_check": {
-      "settings": "v1.7.5 cell-body settings, cells grown from the manual nuclei, vs ground_truth_cyto_cellpose (AGG_003 and nCadherin_002 not used in the tuning)",
+      "settings": "v1.7.5 cell-body settings, cells grown from the manual nuclei, vs ground_truth_cyto_cellpose (GT5 and GT6 not used in the tuning)",
       "mean_cell_iou": 0.556,
       "per_image": {
-        "EB-019_M1_CUBE_S1_20x": {
+        "GT1": {
           "mean_cell_iou": 0.477,
           "cells_mean_f1": 0.225,
           "cells_f1_50": 0.472,
           "cyto_mean_f1": 0.056
         },
-        "AGG-CADHERIN-INTEGRIN_002": {
+        "GT2": {
           "mean_cell_iou": 0.548,
           "cells_mean_f1": 0.452,
           "cells_f1_50": 0.608,
           "cyto_mean_f1": 0.309
         },
-        "10%GelMA_hAC_integrin_005": {
+        "GT3": {
           "mean_cell_iou": 0.456,
           "cells_mean_f1": 0.19,
           "cells_f1_50": 0.421,
           "cyto_mean_f1": 0.112
         },
-        "AGG-CADHERIN-INTEGRIN_005": {
+        "GT4": {
           "mean_cell_iou": 0.577,
           "cells_mean_f1": 0.475,
           "cells_f1_50": 0.648,
           "cyto_mean_f1": 0.405
         },
-        "AGG-CADHERIN-INTEGRIN_003": {
+        "GT5": {
           "mean_cell_iou": 0.629,
           "cells_mean_f1": 0.603,
           "cells_f1_50": 0.772,
           "cyto_mean_f1": 0.531
         },
-        "nCadherin_002": {
+        "GT6": {
           "mean_cell_iou": 0.652,
           "cells_mean_f1": 0.652,
           "cells_f1_50": 0.88,

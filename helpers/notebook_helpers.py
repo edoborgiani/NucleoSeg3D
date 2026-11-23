@@ -2514,7 +2514,7 @@ def _compute_automatic_contrast_limits(im_view, method="legacy"):
       brightest (often saturated/outlier) pixels don't wash out the contrast.
 
     ``method='calibrated'`` (v1.6.4, ``automatic_contrast='calibrated'``),
-    fitted on the nuclei ground truths of EB-019 and AGG-CADHERIN-INTEGRIN_002
+    fitted on the nuclei ground truths of GT1 and GT2
     (validation/tune_segmentation.py):
 
     - Cont_min = background - 0.25 x noise (background = median, noise =
@@ -6812,7 +6812,7 @@ def estimate_z_attenuation(channel_zyx, model="exp", signal_percentile=99.9,
 
     In confocal stacks the excitation and the emitted light are attenuated
     on their way through the sample, so the nuclei of the deep slices are
-    dimmer above the same background (in the EB-019 and AGG ground truths
+    dimmer above the same background (in the GT1 and GT2/GT4 ground truths
     the signal above background falls ~3x from the first to the last
     slice), and a threshold set on the whole stack loses or shrinks them.
 
@@ -8960,7 +8960,7 @@ def split_tall_nuclei(labels, intensity, spacing_zyx, volume_factor=1.3, elongat
     dropped if a piece would be smaller than ``min_piece_fraction`` x the
     typical volume.
 
-    On the AGG ground truth, the merges left after `split_nuclei_by_saddles`
+    On the GT2/GT4 ground truths, the merges left after `split_nuclei_by_saddles`
     were mostly such pairs, 6-8 um apart in Z with no intensity dip.
 
     Returns ``(labels, n_new, typical_volume, typical_elongation)``.
@@ -9162,7 +9162,7 @@ def rescue_missed_nuclei(labels, intensity, spacing_zyx, min_contrast=0.25, grow
 
 
 # v1.6.4: what the settings of validation_tuning/multi_v168/best_settings.json
-# were tuned for. On EB-019 (0.33 um pixels) and AGG (0.21 um), both at
+# were tuned for. On GT1 (0.33 um pixels) and GT2/GT4 (0.21 um), both at
 # scale_factor 0.5, a nucleus of 8 um spanned 12 and 19 voxels: the voxel-based
 # settings (sigma, gradient smoothing, minimum piece size...) are validated in
 # that range. The um settings below were tuned for an 8 um nucleus.
@@ -9210,7 +9210,7 @@ def measure_nuclei_in_image(nuclei_zyx, voxel_size_zyx, contrast=None, edge_leve
     extent at ``edge_level`` x its own peak above background; only clean
     profiles count (the intensity falls below that level before rising
     towards a neighbour or reaching the border), so touching nuclei do not
-    shorten it. ``edge_level`` 0.3 calibrated: on the EB-019 and AGG ground
+    shorten it. ``edge_level`` 0.3 calibrated: on the GT1 and GT2/GT4 ground
     truths the equivalent diameter (d_xy^2 d_z)^(1/3) came out 8.1 and 7.7 um,
     where the tuner found ``nuclei_diameter`` 8 best on both.
 
@@ -9518,14 +9518,14 @@ def adapt_nuclei_settings(measurement, settings, voxel_size_zyx, reference=None,
     - ``nuclei_diameter`` = the measured equivalent diameter, if it is more
       than ``diameter_tolerance`` (10%) off the current one. Smaller changes
       are within the precision of the measure: on the three ground truths
-      (EB-019, AGG, GelMA) moving 8.0 um by 0.2-0.3 um only added noise.
+      (GT1, GT2/GT4, GT3) moving 8.0 um by 0.2-0.3 um only added noise.
     - The um settings tuned for the reference nucleus (haze radius, edge
       margin) are scaled with the new diameter (only when it changed).
     - ``scale_factor`` (``adapt_scale``): changed only if a nucleus would
       span fewer / more voxels than on the tuned images, to the nearest end
       of that range (at most 1.0: the image is never upsampled).
     - ``z_elongation`` is not changed: the tuned value did not follow the
-      measured elongation (AGG nuclei measure ~1.5, 2.5 scored best).
+      measured elongation (GT2/GT4 nuclei measure ~1.5, 2.5 scored best).
 
     Nothing changes if fewer than ``min_measured`` nuclei were measured.
     Returns ``(adapted settings, changes)``, ``changes`` = list of
@@ -10148,7 +10148,7 @@ def grow_cells_xy(cells, distance_px):
 
     A growth below one pixel (but above zero) grows by one pixel: with a coarse
     XY voxel the requested growth in um would otherwise silently do nothing
-    (e.g. 0.62 um on 0.66 um pixels: EB-019 mean cell IoU 0.330 instead of 0.473)."""
+    (e.g. 0.62 um on 0.66 um pixels: GT1 mean cell IoU 0.330 instead of 0.473)."""
     from skimage.segmentation import expand_labels
     if distance_px <= 0:
         return cells
@@ -11018,12 +11018,17 @@ def build_vtk_volumes(
     blocks_cyto = pv.MultiBlock()
     blocks_PCM = pv.MultiBlock()
 
-    nuc_vol = np.zeros((nuc_max + 1,))
-    nuc_coord = np.zeros((nuc_max + 1, 3))
-    cyto_vol = np.zeros((cyto_max + 1,))
-    cyto_coord = np.zeros((cyto_max + 1, 3))
-    PCM_vol = np.zeros((pcm_max + 1,))
-    PCM_coord = np.zeros((pcm_max + 1, 3))
+    # Indexed by the running mesh counter k (up to nuc_max), not by the
+    # label: sized for every layer, so an empty PCM (LIVE/DEAD notebook) or a
+    # cytoplasm with fewer labels than nuclei can't run past the end. Without
+    # a PCM its volume stays 0 (the cell volume alone in the relative volumes).
+    n_slots = max(nuc_max, cyto_max, pcm_max) + 1
+    nuc_vol = np.zeros((n_slots,))
+    nuc_coord = np.zeros((n_slots, 3))
+    cyto_vol = np.zeros((n_slots,))
+    cyto_coord = np.zeros((n_slots, 3))
+    PCM_vol = np.zeros((n_slots,))
+    PCM_coord = np.zeros((n_slots, 3))
 
     k = 0
     for j in _progress_iter(range(1, nuc_max + 1), progress, desc='Step 30 - Build VTK Volumes'):
