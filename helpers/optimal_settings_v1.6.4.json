@@ -3,10 +3,10 @@
   "description": "Settings of the nuclei segmentation found by validation/tune_segmentation.py on four manual ground truths. Watershed path. The NUCLEI contrast is set for every image from its own histogram (calibrated rule) and the nucleus size from the image (auto_adapt_settings).",
   "source": "validation_tuning/multi4_v171/best_settings.json",
   "ground_truths": [
-    "EB-019_M1_CUBE_S1_20x",
-    "AGG-CADHERIN-INTEGRIN_002",
-    "10%GelMA_hAC_integrin_005",
-    "AGG-CADHERIN-INTEGRIN_005"
+    "GT1",
+    "GT2",
+    "GT3",
+    "GT4"
   ],
   "validation": {
     "objective": "mean F1 over IoU 0.5-0.75 (whole crop)",
@@ -15,7 +15,7 @@
       "f1_50": 0.736
     },
     "per_image": {
-      "EB-019_M1_CUBE_S1_20x": {
+      "GT1": {
         "f1_50": 0.665,
         "precision_50": 0.697,
         "recall_50": 0.636,
@@ -25,7 +25,7 @@
         "fn": 78,
         "mean_f1": 0.306
       },
-      "AGG-CADHERIN-INTEGRIN_002": {
+      "GT2": {
         "f1_50": 0.802,
         "precision_50": 0.859,
         "recall_50": 0.753,
@@ -35,7 +35,7 @@
         "fn": 24,
         "mean_f1": 0.617
       },
-      "10%GelMA_hAC_integrin_005": {
+      "GT3": {
         "f1_50": 0.74,
         "precision_50": 0.844,
         "recall_50": 0.659,
@@ -45,7 +45,7 @@
         "fn": 56,
         "mean_f1": 0.541
       },
-      "AGG-CADHERIN-INTEGRIN_005": {
+      "GT4": {
         "f1_50": 0.736,
         "precision_50": 0.819,
         "recall_50": 0.669,
@@ -56,7 +56,7 @@
         "mean_f1": 0.574
       }
     },
-    "note": "Scores with each ground-truth image's own contrast and edge fraction; on a new image the shared values below apply (edge fraction for ground truths painted like EB-019 / AGG_002)."
+    "note": "Scores with each ground-truth image's own contrast and edge fraction; on a new image the shared values below apply (edge fraction for ground truths painted like GT1 / GT2)."
   },
   "settings": {
     "scale_factor": 0.5,
