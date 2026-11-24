@@ -3,7 +3,8 @@
 The user notebooks ask only what depends on the experiment (file, ROI, stain
 table, cell size, method, exports). Every setting of the segmentation itself
 was tuned against manual ground truths and is read here from
-``optimal_settings_v<version>.json`` (next to this file). Each notebook loads
+``settings/optimal_settings_v<version>.json`` (``SETTINGS_DIR``, the
+``settings`` folder at the top of the repository). Each notebook loads
 its own version, so an older notebook keeps its results:
 
 - **v1.6.4** (`NucleoSeg3D_v1.6.4.ipynb`, and the LIVE/DEAD notebook through
@@ -40,13 +41,15 @@ from pathlib import Path
 
 VERSIONS = ("1.6.4", "1.6.41")
 LATEST = VERSIONS[-1]
+# the settings files: <repository>/settings/
+SETTINGS_DIR = Path(__file__).resolve().parent.parent / "settings"
 
 
 def settings_file(version="1.6.4"):
-    """The settings file of one version (``optimal_settings_v<version>.json``)."""
+    """The settings file of one version (``settings/optimal_settings_v<version>.json``)."""
     if version not in VERSIONS:
         raise ValueError(f"version must be one of {VERSIONS}, not {version!r}")
-    return Path(__file__).with_name(f"optimal_settings_v{version}.json")
+    return SETTINGS_DIR / f"optimal_settings_v{version}.json"
 
 
 # default of load_optimal_settings: v1.6.4, so the v1.6.4 and LIVE/DEAD

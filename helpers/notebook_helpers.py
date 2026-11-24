@@ -2498,6 +2498,19 @@ def _normalize_channel_to_uint8_view(im_channel):
     return ((im_channel - imin) / (imax - imin) * 255).clip(0, 255).astype(np.uint8)
 
 
+def _contrast_mode(automatic_contrast=False, calibrated_contrast=None):
+    """``automatic_contrast`` value for the notebook switch ``calibrated_contrast``.
+
+    True -> ``'calibrated'`` (from each channel's histogram, no napari window),
+    False -> False (set in napari), None -> ``automatic_contrast`` unchanged.
+    """
+    if calibrated_contrast is not None:
+        automatic_contrast = "calibrated" if calibrated_contrast else False
+    if automatic_contrast not in (False, True, "calibrated"):
+        raise ValueError("automatic_contrast must be False, True or 'calibrated'")
+    return automatic_contrast
+
+
 def _compute_automatic_contrast_limits(im_view, method="legacy"):
     """Pick (Cont_min, Cont_max) for one channel from its intensity histogram.
 
@@ -2627,11 +2640,18 @@ def prepare_stain_settings(
     automatic_contrast=False,
     progress=None,
     suggest_contrast=False,
+    calibrated_contrast=None,
 ):
     """Load or interactively collect contrast/gamma settings for each channel.
 
     Parameters
     ----------
+    calibrated_contrast : bool, optional
+        The notebook switch (Cell 3). True = contrast of the marker channels
+        from each channel's histogram with the calibrated rule (no napari
+        window; same as ``automatic_contrast='calibrated'``); False = set them
+        yourself in the napari viewer (same as ``automatic_contrast=False``).
+        None (default) = use ``automatic_contrast``.
     r_xyz : tuple of float (r_X, r_Y, r_Z), optional
         Physical voxel sizes in micrometers. Applied as the napari layer scale
         during interactive setup so the preview isn't stretched/squashed
@@ -2654,9 +2674,8 @@ def prepare_stain_settings(
         suggestion (:func:`suggest_contrast_settings`), with a note for each
         value far from it.
     """
-    if automatic_contrast not in (False, True, "calibrated"):
-        raise ValueError("automatic_contrast must be False, True or 'calibrated'")
-    auto_method = "calibrated" if automatic_contrast == "calibrated" else "legacy"
+    automatic_contrast = _contrast_mode(automatic_contrast, calibrated_contrast)
+    auto_method ="calibrated" if automatic_contrast == "calibrated" else "legacy"
     stain_df = stain_df.reset_index(drop=False)
     stain_initial_df = stain_df.copy()
     stain_initial_df.set_index(["Condition", "Marker", "Laser"], inplace=True)
@@ -2708,7 +2727,9 @@ def prepare_stain_settings(
                     if auto_method == "calibrated"
                     else "histogram peak + 1 to the 99th percentile intensity")
             print(
-                f"automatic_contrast is {automatic_contrast!r} — skipped the napari viewer and "
+                ("calibrated_contrast is True" if automatic_contrast == "calibrated"
+                 else f"automatic_contrast is {automatic_contrast!r}")
+                + " — skipped the napari viewer and "
                 f"picked Cont_min/Cont_max per channel automatically ({rule}); Gamma left at 1.0."
             )
         else:
@@ -12321,6 +12342,7 @@ def run_batch_folder(
     trig_cellpose_cyto=False,
     multilabel=True,
     aggregate_distance_factor=0.05,
+    calibrated_contrast=None,
     nuclei_split_config=None,
     cyto_split_config=None,
     iterative_split=True,
@@ -12366,9 +12388,10 @@ def run_batch_folder(
 
     Contrast/gamma settings come from ``<name_setup>_setup.csv`` like in
     Cell 8: if it doesn't exist yet (or ``use_setup`` is False), the napari
-    setup viewer opens -- or ``automatic_contrast`` picks limits -- and the
-    CSV written for the first image is then reused for the following ones
-    (as long as ``use_setup`` is True).
+    setup viewer opens -- or, with ``calibrated_contrast=True`` (or
+    ``automatic_contrast``), the limits are picked from each channel's
+    histogram -- and the CSV written for the first image is then reused for
+    the following ones (as long as ``use_setup`` is True).
 
     ``membrane_markers`` (from the stain table) are filled as rings into the
     cytoplasm and used as cell borders when splitting it (Cell 19).
@@ -12391,6 +12414,7 @@ def run_batch_folder(
     if unknown:  # fail before the first file, not once per file
         raise ValueError(f"Unknown nuclei_options: {sorted(unknown)}; "
                          f"known: {sorted(BATCH_NUCLEI_OPTIONS)}")
+    automatic_contrast = _contrast_mode(automatic_contrast, calibrated_contrast)
 
     image_files = list_image_files(input_folder)
     if not image_files:
@@ -15166,6 +15190,7 @@ def run_ld_batch_folder(
     ld_min_brightness=0.0,
     ld_edge_brightness=0.0,
     ld_min_snr=0.0,
+    calibrated_contrast=None,
 ):
     """Process every supported image file in *input_folder* with the full
     LIVE/DEAD pipeline and write each image's outputs into its own
@@ -15191,6 +15216,7 @@ def run_ld_batch_folder(
     """
     import traceback
 
+    automatic_contrast = _contrast_mode(automatic_contrast, calibrated_contrast)
     image_files = list_image_files(input_folder)
     if not image_files:
         raise FileNotFoundError(
