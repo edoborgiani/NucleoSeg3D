@@ -151,6 +151,8 @@ __all__ = [
     "combine_live_dead_inputs",
     "ld_nuclear_conditions",
     "ld_calibrated_nuclear_contrast",
+    "ld_histogram_features",
+    "ld_adapt_to_histograms",
     "ld_adapt_settings_to_image",
     "ld_remove_nuclear_haze",
     "ld_correct_depth",
@@ -13393,14 +13395,15 @@ def ld_nuclear_conditions(stain_df, localization):
 
 
 def ld_calibrated_nuclear_contrast(im_original, stain_complete_df, original_stain_complete_df,
-                                   nuclear_conditions):
+                                   nuclear_conditions, gamma=1.0):
     """Contrast / gamma of every nuclear marker from its own histogram (the
     'calibrated' rule the NUCLEI settings were validated with,
-    `calibrated_contrast`), written into both stain tables. Returns
-    ``{condition: contrast}``."""
+    `calibrated_contrast`; ``gamma`` = ``nuclei_gamma`` of the settings),
+    written into both stain tables. Returns ``{condition: contrast}``."""
     out = {}
     for cond in nuclear_conditions:
-        contrast = calibrated_contrast(im_original[..., stain_complete_df.index.get_loc(cond)])
+        contrast = calibrated_contrast(im_original[..., stain_complete_df.index.get_loc(cond)],
+                                       gamma=gamma)
         for col, value in contrast.items():
             stain_complete_df.loc[cond, col] = value
             original_stain_complete_df.loc[cond, col] = value
@@ -13410,6 +13413,40 @@ def ld_calibrated_nuclear_contrast(im_original, stain_complete_df, original_stai
     if out:
         print("(the nuclei segmentation settings were validated with this contrast rule)")
     return out
+
+
+def ld_histogram_features(original_image, stain_complete_df, nuclear_conditions):
+    """Histogram features (`helpers.histogram_adapt.channel_histogram_features`)
+    of every channel, plus ``'NUCLEI'``: the merged nuclear markers (each
+    min-max normalized, then the per-voxel maximum), the channel the NUCLEI
+    histogram rules of the settings read in the LIVE/DEAD notebook."""
+    from helpers.histogram_adapt import channel_histogram_features, features_by_condition
+    feats = features_by_condition(original_image, stain_complete_df)
+    merged = None
+    for cond in nuclear_conditions:
+        ch = np.asarray(original_image[..., stain_complete_df.index.get_loc(cond)], dtype=np.float32)
+        lo, hi = float(ch.min()), float(ch.max())
+        ch = (ch - lo) / (hi - lo + 1e-8)
+        merged = ch if merged is None else np.maximum(merged, ch)
+    if merged is not None:
+        feats["NUCLEI"] = channel_histogram_features(merged)
+    return feats
+
+
+def ld_adapt_to_histograms(settings, rules, original_image, stain_complete_df,
+                           nuclear_conditions, keep=()):
+    """Apply the NUCLEI histogram rules (``channel`` 'NUCLEI') of the settings
+    to ``settings`` (in place), read on the merged nuclear markers
+    (`ld_histogram_features`). The cell-body rules are not used: the
+    LIVE/DEAD cell bodies have their own segmentation. Returns
+    ``(changes, features)``."""
+    from helpers.histogram_adapt import adapt_settings
+    nuc_rules = {k: r for k, r in (rules or {}).items()
+                 if r.get("channel", "NUCLEI") == "NUCLEI" and k.partition(".")[0] in settings}
+    if not nuc_rules or not nuclear_conditions:
+        return [], {}
+    feats = ld_histogram_features(original_image, stain_complete_df, nuclear_conditions)
+    return adapt_settings(settings, nuc_rules, feats, keep=keep), feats
 
 
 def _ld_nuclear_view(original_image, stain_complete_df, nuclear_conditions):
@@ -14895,7 +14932,14 @@ def _process_single_image_ld_batch(
     nuclear_in_image = ld_nuclear_conditions(stain_df, localization)
     if opts["nuclei_contrast"] == "calibrated":
         ld_calibrated_nuclear_contrast(im_final_stack['Original image'], stain_complete_df,
-                                       original_stain_complete_df, nuclear_in_image)
+                                       original_stain_complete_df, nuclear_in_image,
+                                       gamma=opts["nuclei_gamma"])
+    histogram_note = "off"
+    if opts["histogram_rules"]:  # v1.6.41 settings: NUCLEI rules on the nuclear markers
+        changes, _ = ld_adapt_to_histograms(
+            opts, opts["histogram_rules"], im_final_stack['Original image'], stain_complete_df,
+            nuclear_in_image)
+        histogram_note = "; ".join(f"{n} {o} -> {v} ({s})" for n, o, v, s in changes) or "no change"
     adapted_note = "off"
     if opts["auto_adapt"] and not is_2d and nuclear_in_image:
         adapted, changes = ld_adapt_settings_to_image(
@@ -14927,6 +14971,7 @@ def _process_single_image_ld_batch(
     im_final_stack = run_normalize(im_final_stack, stain_complete_df=stain_complete_df)
     im_final_stack, r_zX, r_zY, r_zZ = run_resample(
         im_final_stack, stain_complete_df=stain_complete_df, zoom_factors=zooms, meta=meta,
+        edge_mode=opts["resample_edge_mode"],
     )
     im_final_stack = run_denoise(im_final_stack, stain_complete_df=stain_complete_df)
     im_final_stack['Denoised image'] = ld_remove_nuclear_haze(  # v1.2.2
@@ -14974,6 +15019,7 @@ def _process_single_image_ld_batch(
     ld_params.update({f"Nuclei option {k}": (str(v) if isinstance(v, (list, dict)) else v)
                       for k, v in opts.items()})
     ld_params['Settings adapted to the image'] = adapted_note
+    ld_params['Settings adapted to the histograms'] = histogram_note
     export_channel_histograms(
         im_final_stack, stain_complete_df, input_file,
         ROI_print=ROI_print, lazy_loading_used=used_lazy_loading,

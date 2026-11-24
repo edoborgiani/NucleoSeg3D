@@ -4,13 +4,17 @@ The user notebooks ask only what depends on the experiment (file, ROI, stain
 table, cell size, method, exports). Every setting of the segmentation itself
 was tuned against manual ground truths and is read here from
 ``settings/optimal_settings_v<version>.json`` (``SETTINGS_DIR``, the
-``settings`` folder at the top of the repository). Each notebook loads
-its own version, so an older notebook keeps its results:
+``settings`` folder at the top of the repository).
 
-- **v1.6.4** (`NucleoSeg3D_v1.6.4.ipynb`, and the LIVE/DEAD notebook through
-  `helpers.optimal_settings_ld`): tuned on four ground truths;
-- **v1.6.41** (`NucleoSeg3D_v1.6.41.ipynb`): re-tuned on six ground truths,
-  each scored as a new image. Compared with v1.6.4:
+``version='best'`` (the default of `load_optimal_settings`) loads the
+version with the highest nuclei mean F1 on the ground truths (then F1@0.5;
+`best_version`): v1.6.41 at present. It is used by `NucleoSeg3D_v1.6.41.ipynb`
+and the LIVE/DEAD notebook (`helpers.optimal_settings_ld`).
+`NucleoSeg3D_v1.6.4.ipynb` asks for ``'1.6.4'``, so it keeps its results.
+
+- **v1.6.4**: tuned on four ground truths;
+- **v1.6.41**: re-tuned on six ground truths, each scored as a new image.
+  Compared with v1.6.4:
 
   - the calibrated NUCLEI contrast uses gamma ``nuclei_gamma`` 1.15
     instead of 1.0;
@@ -45,15 +49,42 @@ LATEST = VERSIONS[-1]
 SETTINGS_DIR = Path(__file__).resolve().parent.parent / "settings"
 
 
-def settings_file(version="1.6.4"):
-    """The settings file of one version (``settings/optimal_settings_v<version>.json``)."""
+def _validation_score(version):
+    """(mean F1, F1@0.5, number of ground truths) of one settings file."""
+    record = json.loads((SETTINGS_DIR / f"optimal_settings_v{version}.json")
+                        .read_text(encoding="utf-8"))
+    v = (record.get("validation") or {}).get("all") or {}
+    return (float(v.get("mean_f1") or 0.0), float(v.get("f1_50") or 0.0),
+            len(record.get("ground_truths") or []))
+
+
+def best_version():
+    """The version whose validated settings score best on the manual ground
+    truths: highest nuclei mean F1 (IoU 0.5-0.75, accurate outlines), then
+    F1@0.5 (nuclei found), then the number of ground truths. Settings files
+    missing from ``settings/`` are skipped."""
+    present = [v for v in VERSIONS if (SETTINGS_DIR / f"optimal_settings_v{v}.json").exists()]
+    if not present:
+        raise FileNotFoundError(f"No settings file in {SETTINGS_DIR}")
+    return max(present, key=_validation_score)
+
+
+def resolve_version(version="best"):
+    """``version``, with ``'best'`` replaced by `best_version`."""
+    if version == "best":
+        return best_version()
     if version not in VERSIONS:
-        raise ValueError(f"version must be one of {VERSIONS}, not {version!r}")
-    return SETTINGS_DIR / f"optimal_settings_v{version}.json"
+        raise ValueError(f"version must be 'best' or one of {VERSIONS}, not {version!r}")
+    return version
 
 
-# default of load_optimal_settings: v1.6.4, so the v1.6.4 and LIVE/DEAD
-# notebooks (which pass no version) keep their settings
+def settings_file(version="best"):
+    """The settings file of one version (``settings/optimal_settings_v<version>.json``;
+    ``'best'`` = `best_version`)."""
+    return SETTINGS_DIR / f"optimal_settings_v{resolve_version(version)}.json"
+
+
+# the settings file of the v1.6.4 notebook (kept for older code)
 SETTINGS_FILE = settings_file("1.6.4")
 
 # segment_nuclei keywords taken from the settings (besides the user's own)
@@ -74,13 +105,23 @@ _BATCH_OPTION_KEYS = (
     "nuclei_gamma", "resample_edge_mode")
 
 
-def load_optimal_settings(custom_settings=None, path=None, verbose=True, version="1.6.4"):
+def load_optimal_settings(custom_settings=None, path=None, verbose=True, version="best"):
     """The validated settings of ``version`` as a dict (``opt``), with
     ``custom_settings`` (``{name: value}``) applied on top.
+    ``version``: ``'best'`` (default) = the best-scoring settings file
+    (`best_version`), or a version of `VERSIONS` (e.g. ``'1.6.4'`` to keep
+    the results of an older notebook).
     ``nuclei_split_config_overrides`` in ``custom_settings`` is merged into the
-    validated one. Adds ``nuclei_split_config`` (for `segment_nuclei`).
-    ``path`` (a settings file) overrides ``version``."""
+    validated one. Adds ``nuclei_split_config`` (for `segment_nuclei`) and
+    ``_version`` (the version loaded). ``path`` (a settings file) overrides
+    ``version``."""
     from helpers.notebook_helpers import get_nuclei_split_config
+    if verbose and not path and version == "best":
+        best = best_version()
+        others = ", ".join(f"v{v} {_validation_score(v)[0]:.3f}" for v in VERSIONS
+                           if v != best and (SETTINGS_DIR / f"optimal_settings_v{v}.json").exists())
+        print(f"version='best': v{best}, the highest nuclei mean F1 on the ground truths"
+              + (f" (others: {others})." if others else "."))
     path = Path(path) if path else settings_file(version)
     record = json.loads(path.read_text(encoding="utf-8"))
     opt = dict(record["settings"])
@@ -103,6 +144,7 @@ def load_optimal_settings(custom_settings=None, path=None, verbose=True, version
                          "channels: setup file, napari or automatic_contrast)")
     opt["nuclei_split_config"] = get_nuclei_split_config(
         profile="balanced", **opt["nuclei_split_config_overrides"])
+    opt["_version"] = record.get("version")
     if verbose:
         v = record.get("validation", {})
         print(f"Optimal settings v{record.get('version')} ({path.name}), validated on "
@@ -286,6 +328,7 @@ def settings_for_report(opt, adapt_changes=()):
     skip = {"nuclei_split_config", "nuclei_split_config_overrides", "histogram_rules"}
     report = {f"Optimal setting {k}": (str(v) if isinstance(v, (list, dict)) else v)
               for k, v in opt.items() if k not in skip and not k.startswith("_")}
+    report["Settings version"] = opt.get("_version")
     report["Watershed split config"] = str(opt["nuclei_split_config_overrides"])
     report["Settings adapted to the image"] = (
         "; ".join(f"{n} {o} -> {v}" for n, o, v, _ in adapt_changes) or
