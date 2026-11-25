@@ -65,9 +65,10 @@ Segments LIVE/DEAD-stained images and calls every cell LIVE or DEAD, with the sa
 ├── NucleoSeg3D_v1.6.4.ipynb         # Previous version (v1.6.4 settings)
 ├── NucleoSeg3D_v1.6.3.ipynb         # Older version
 ├── NucleoSeg3D_LD_v1.2.2.ipynb      # The LIVE/DEAD notebook (current, best settings)
-├── requirements.txt                 # Python dependencies
-├── overrides.txt                    # uv --override file (see Prerequisites)
 ├── README.md                        # This file
+├── install/
+│   ├── requirements.txt             # Python dependencies
+│   └── overrides.txt                # uv --override file (see Prerequisites)
 ├── settings/
 │   ├── optimal_settings_v1.6.41.json # Validated settings of v1.6.41 and their scores
 │   └── optimal_settings_v1.6.4.json  # Validated settings of v1.6.4 and their scores
@@ -140,7 +141,7 @@ Type (or paste) **one command at a time**, press **Enter**, and wait for it to f
 
 8. **Install the dependencies** (takes a few minutes):
    ```powershell
-   uv pip install -r requirements.txt --override overrides.txt
+   uv pip install -r install/requirements.txt --override install/overrides.txt
    ```
 
 9. **Launch Jupyter** — it opens in your browser:
@@ -195,7 +196,7 @@ Open the **Terminal** app (Applications → Utilities → Terminal).
 
 8. **Install the dependencies** (takes a few minutes):
    ```bash
-   uv pip install -r requirements.txt --override overrides.txt
+   uv pip install -r install/requirements.txt --override install/overrides.txt
    ```
 
 9. **Launch Jupyter** — it opens in your browser:
@@ -272,7 +273,7 @@ Open a terminal.
 
 8. **Install the dependencies** (takes a few minutes):
    ```bash
-   uv pip install -r requirements.txt --override overrides.txt
+   uv pip install -r install/requirements.txt --override install/overrides.txt
    ```
 
 9. **Launch Jupyter** — it opens in your browser:
@@ -421,7 +422,7 @@ Four ground truths: mean F1 0.509, F1@0.5 0.736. These scores used each image's 
 The LIVE/DEAD notebook uses the best-scoring settings (now v1.6.41), validated on the nuclei of the nuclei notebook, not on LIVE/DEAD images. Its call (`min_positive_fraction`, `ld_rule`) and bright-signal filter have not been validated against annotations.
 
 ## Requirements
-See `requirements.txt` for the full list. Key dependencies:
+See `install/requirements.txt` for the full list. Key dependencies:
 - `napari[all]`, `numpy`, `scipy`, `scikit-image`, `matplotlib`, `pandas`
 - `jupyter` (includes `ipywidgets`, used by the interactive stain table), with `ipykernel<7`: with ipykernel 7 napari windows don't open (Windows) or freeze (macOS). On an existing environment, run `uv pip install "ipykernel<7"` and restart the kernel.
 - `aicsimageio[nd2]`, `nd2reader`, `aicspylibczi` + `fsspec`, `readlif`, `oiffile` — image readers (ND2, TIFF/OME-TIFF, CZI, LIF, OIB); plain TIFFs are read with `tifffile`, installed with aicsimageio

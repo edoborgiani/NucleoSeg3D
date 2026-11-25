@@ -5,7 +5,7 @@
 # numpy/scipy/tensorflow/lxml below are pinned per Python version via markers,
 # since their <3.13 pins have no Python 3.13 wheels. Install with (uv
 # required -- see the lxml note below for why):
-#   uv pip install -r requirements.txt --override overrides.txt
+#   uv pip install -r install/requirements.txt --override install/overrides.txt
 #
 # Core / visualization
 napari[all]
